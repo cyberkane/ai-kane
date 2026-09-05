@@ -29,16 +29,17 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+    # ЖЕСТКИЙ ФИКС: Запускаем сервер через конкретную версию Python 3.14, где лежит hvac
+    command: python3.14 main.py
     environment:
       - OLLAMA_HOST=http://ollama:11434/v1/chat/completions
       - MODEL_NAME=llama3.1:8b
-      - INFLUX_URL=http://influxdb:8080/api/v3/write_lp?db=ai-metrics
-      - INFLUX_TOKEN=apiv3_kane_secret_token_2026_secured
     depends_on:
       - ollama
       - influxdb
     networks:
       - ai-kane-net
+
 
   # ИСПРАВЛЕННАЯ СВОБОДНАЯ INFLUXDB 3 CORE
   influxdb:
@@ -76,9 +77,23 @@ services:
     networks:
       - ai-kane-net
 
+  vault:
+    image: hashicorp/vault:1.15
+    container_name: ai_vault
+    ports:
+      - "8200:8200" # Открываем веб-интерфейс на порту 8200 вашего ПК
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=kane-master-vault-token-2026 # Мастер-ключ для самого Vault
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    volumes:
+      - vault_storage:/vault/file
+    networks:
+      - ai-kane-net
+
 volumes:
   ollama_storage:
   influxdb3_storage:
+  vault_storage:
 
 networks:
   ai-kane-net:
