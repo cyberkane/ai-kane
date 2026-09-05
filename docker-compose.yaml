@@ -26,19 +26,59 @@ services:
     build: .
     container_name: ai-kane-agent
     ports:
-      - "8000:8000" # ПРОБРАСЫВАЕМ ПОРТ ДЛЯ VS CODE
+      - "8000:8000"
     volumes:
       - .:/app
     environment:
       - OLLAMA_HOST=http://ollama:11434/v1/chat/completions
       - MODEL_NAME=llama3.1:8b
+      - INFLUX_URL=http://influxdb:8080/api/v3/write_lp?db=ai-metrics
+      - INFLUX_TOKEN=apiv3_kane_secret_token_2026_secured
     depends_on:
       - ollama
+      - influxdb
+    networks:
+      - ai-kane-net
+
+  # ИСПРАВЛЕННАЯ СВОБОДНАЯ INFLUXDB 3 CORE
+  influxdb:
+    image: influxdb:3-core
+    container_name: influxdb3_core
+    user: "root"
+    ports:
+      - "8181:8080"
+    volumes:
+      - influxdb3_storage:/var/lib/influxdb3/data
+    environment:
+      - INFLUXDB3_NODE_ID=node0
+      - INFLUXDB3_OBJECT_STORE=file
+      - INFLUXDB3_DATA_DIR=/var/lib/influxdb3/data
+      - INFLUXDB_INITIAL_ADMIN_TOKEN=apiv3_kane_secret_token_2026_secured
+    # Возвращаем явную команду запуска, чтобы поднять сетевой стек на порту 8080
+    command:
+      - influxdb3
+      - serve
+      - --node-id=node0
+      - --object-store=file
+      - --data-dir=/var/lib/influxdb3/data
+    networks:
+      - ai-kane-net
+
+  influxdb-ui:
+    image: influxdata/influxdb3-ui:1.9.0
+    container_name: influxdb3_explorer
+    ports:
+      - "8888:8080"
+    command:
+      - --mode=admin
+    depends_on:
+      - influxdb
     networks:
       - ai-kane-net
 
 volumes:
   ollama_storage:
+  influxdb3_storage:
 
 networks:
   ai-kane-net:
