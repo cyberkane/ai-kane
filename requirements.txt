@@ -1,1 +1,6 @@
 requests
+fastapi
+uvicorn
+uvloop
+uvicorn[standard]
+uv
