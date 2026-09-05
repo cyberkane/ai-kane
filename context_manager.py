@@ -1,10 +1,10 @@
 import json
 import os
+from datetime import datetime
 from config import SYSTEM_PROMPT, MAX_HISTORY_LEN
 
 class ContextManager:
     def __init__(self):
-        # Инициализируем историю с системного промпта
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
         
     def add_message(self, role: str, content: str):
@@ -12,22 +12,27 @@ class ContextManager:
         self._optimize_context()
         
     def _optimize_context(self):
-        # Если сообщений в истории (не считая системного промпта) больше лимита
         if len(self.history) > MAX_HISTORY_LEN + 1:
-            # Вырезаем старые сообщения, но ВСЕГДА оставляем системный промпт на индексе 0
             system_prompt_node = self.history[0]
             recent_messages = self.history[-MAX_HISTORY_LEN:]
-            
-            # Собираем чистый плоский массив для OpenAI/Ollama API
             self.history = [system_prompt_node] + recent_messages
 
     def get_context(self):
         return self.history
 
-    def save_history_to_disk(self, filename="history_log.json"):
+    def save_history_to_disk(self):
+        # Автоматически создаем папку logs внутри директории проекта на NVMe
+        log_dir = "logs"
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        # Формируем имя файла с текущей датой и временем
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        filename = os.path.join(log_dir, f"session_{timestamp}.json")
+        
         try:
             with open(filename, "w", encoding="utf-8") as f:
                 json.dump(self.history, f, ensure_ascii=False, indent=4)
-            print(f"\n[AI-Kane]: История диалога успешно сохранена в {filename}")
+            print(f"\n[AI-Kane]: Сессия успешно сохранена в файл: {filename}")
         except Exception as e:
             print(f"\n[Ошибка сохранения истории]: {e}")
