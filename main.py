@@ -7,6 +7,7 @@ import hvac
 import aiofiles
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 # =====================================================================
 # ЧАСТЬ 1: ИНИЦИАЛИЗАЦИЯ И СЕКРЕТЫ VAULT
@@ -35,6 +36,10 @@ AUTO_MODEL = os.getenv("AUTOCOMPLETE_MODEL", "qwen2.5-coder:1.5b")
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb3_core:8181")
 INFLUX_DATABASE = os.getenv("INFLUX_DATABASE", "ai_kane_history")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
+
+# Базовый путь для синтеза речи (Строго по внутренней докер-сети из architecture.md)
+TTS_URL = os.getenv("TTS_URL", "http://kokoro-tts:8880")
+TTS_VOICE = os.getenv("TTS_VOICE", "af_bella")  # Базовый чистый голос (можно менять)
 
 DEFAULT_MARM_PROMPT = (
     "Ты киберкотик, прибывший с далекой Мармеладной планеты. "
@@ -330,6 +335,66 @@ async def ollama_wildcard_catch(path: str, request: Request):
         except Exception as e:
             print(f"❌ [Wildcard Error] Ошибка системного метода /api/{clean_path} через шлюз хоста: {e}")
             return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# =====================================================================
+# ЧАСТЬ 6: ЗАПУСК МАРМЕЛАДНОГО ГОЛОСА
+# =====================================================================
+
+# Гарантируем наличие папки для сохранения аудиофайлов на диске контейнера
+os.makedirs("/app/static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="/app/static"), name="static")
+
+@app.post("/api/tts")
+async def generate_cat_voice(request: Request):
+    """
+    Асинхронно отправляет текст в Kokoro Server по внутренней докер-сети 
+    и генерирует мармеладный аудиофайл WAV.
+    """
+    try:
+        body = await request.json()
+        text_to_speak = body.get("text", "").strip()
+        
+        if not text_to_speak:
+            return JSONResponse(content={"error": "Текст для озвучки пуст, мяу!"}, status_code=400)
+
+        # Формируем OpenAI-совместимый манифест для Kokoro TTS
+        payload = {
+            "model": "kokoro",
+            "input": text_to_speak,
+            "voice": TTS_VOICE,
+            "response_format": "wav",
+            "speed": 1.0
+        }
+
+        timeout = httpx.Timeout(30.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            # Шлём запрос на внутренний докер-порт 8880 нашего голосового контейнера
+            response = await client.post(f"{TTS_URL}/v1/audio/speech", json=payload)
+            
+            if response.status_code != 200:
+                print(f"⚠️ [TTS Warning] Движок Kokoro отклонил запрос: {response.text}")
+                return JSONResponse(content={"error": "Сбой генерации речи голосовым движком"}, status_code=500)
+
+            # Генерируем уникальное имя для мармеладного аудиофайла
+            file_id = f"marm_{uuid.uuid4().hex[:8]}.wav"
+            file_path = f"/app/static/{file_id}"
+            
+            # Асинхронно записываем полученные аудиобайты на диск
+            async with aiofiles.open(file_path, mode="wb") as f:
+                await f.write(response.content)
+                
+            print(f"🎙️ [TTS Success] Мармеладный аудиофайл {file_id} успешно сгенерирован!")
+            
+            # Возвращаем ссылку, по которой плагин или браузер сможет воспроизвести звук
+            return JSONResponse(content={
+                "status": "success",
+                "file_name": file_id,
+                "audio_url": f"http://localhost:8977/static/{file_id}"
+            })
+
+    except Exception as e:
+        print(f"❌ [TTS Error] Критический сбой сектора Мультимедиа: {repr(e)}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # =====================================================================
 # ФИНАЛЬНЫЙ ЗАПУСК КВАНТОВОГО МАРМЕЛАДНОГО ШЛЮЗА

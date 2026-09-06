@@ -22,6 +22,7 @@ services:
       - INFLUX_TOKEN=${INFLUX_ADMIN_TOKEN}
       - INFLUX_DATABASE=ai_kane_history
       - INFLUX_ORG=marmai_planet
+      - TTS_URL=http://kokoro-tts:8880
     restart: unless-stopped
     # Стыкуемся строго с единой внешней глобальной сетью
     networks:
