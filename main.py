@@ -1,201 +1,159 @@
-import sys
-import json
-import time
 import os
-import requests
-import uvicorn
-import queue
-import threading
+import json
+import httpx
+import hvac
+import aiofiles
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
-from config import OLLAMA_HOST, MODEL_NAME, NUM_CTX
-from context_manager import ContextManager
+from fastapi.responses import StreamingResponse, JSONResponse
 
-# Защита кодировки вывода логов сервера
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+app = FastAPI(title="AI-Kane Cyber-Cat Agent")
 
-app = FastAPI(title="AI-Kane Proxy Server (Thread-Isolated)")
-context = ContextManager()
+# Настройки секретов и Vault
+VAULT_URL = os.getenv("VAULT_URL", "http://ai_vault_core:8200")
+VAULT_TOKEN = os.getenv("VAULT_DEV_ROOT_TOKEN_ID")
 
-print("\n" + "="*50)
-print(" 🐱 AI-Kane Core Server v5.2 [Freeze-Thread Observability] Online")
-print(f" Proxying requests to Ollama Core -> {MODEL_NAME}")
-print("="*50 + "\n")
+try:
+    vault_client = hvac.Client(url=VAULT_URL, token=VAULT_TOKEN)
+    if vault_client.is_authenticated():
+        print("🔮 [Vault] Соединение установлено! Мармеладные секреты активны.")
+except Exception as e:
+    print(f"⚠️ [Vault] Сбой моста: {e}")
 
-# Чистая изолированная функция логирования в InfluxDB 3 Core
-def log_to_influxdb_worker(user_msg: str, ai_msg: str, speed: float, lat: float):
-    print("\n [Поток InfluxDB]: Инициализирую отправку пакета...")
+# Базовые пути для контейнеров моделей
+CHAT_URL = os.getenv("CHAT_LLM_URL", "http://ai_ollama_core:11434/v1")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.1:8b")
+AUTO_URL = os.getenv("AUTOCOMPLETE_LLM_URL", "http://ai_qwen_core:11434/v1")
+AUTO_MODEL = os.getenv("AUTOCOMPLETE_MODEL", "qwen2.5-coder:1.5b")
+
+DEFAULT_MARM_PROMPT = (
+    "Ты киберкотик, прибывший с далекой Мармеладной планеты. "
+    "В твоей речи мягкость мармелада сочетается с точностью квантового компьютера."
+)
+
+async def load_system_prompt() -> str:
+    prompt_path = "/app/system_prompt.md"
+    if not os.path.exists(prompt_path):
+        return DEFAULT_MARM_PROMPT
     try:
-        import hvac
-        client = hvac.Client(url='http://vault:8200', token='kane-master-vault-token-2026')
-        read_response = client.secrets.kv.v2.read_secret_version(path='influx_keys')
-        influx_token = read_response['data']['data']['token']
-        print(" [Поток InfluxDB]: Секретный токен успешно извлечен из Vault! 🔒🔑")
-    except Exception as vault_err:
-        print(f" [Критическая ошибка Vault]: Не удалось забрать секрет! Детали: {vault_err}")
-        return
+        async with aiofiles.open(prompt_path, mode="r", encoding="utf-8") as f:
+            content = await f.read()
+            return content.strip() if content.strip() else DEFAULT_MARM_PROMPT
+    except Exception:
+        return DEFAULT_MARM_PROMPT
 
-    influx_url = "http://influxdb3_core:8181/api/v3/write_lp?db=ai-metrics"
-    try:
-        clean_user = user_msg.replace("\n", " ").replace('"', '\\"').replace(',', '\\,')
-        clean_ai = ai_msg.replace("\n", " ").replace('"', '\\"').replace(',', '\\,')
-        
-        line_protocol_data = (
-            f"ai_chat_history,model={MODEL_NAME} "
-            f"speed={speed:.2f},"
-            f"latency={lat:.3f},"
-            f"user_message=\"{clean_user}\","
-            f"assistant_message=\"{clean_ai}\""
-        )
-        
-        headers = {
-            "Authorization": f"Token {influx_token}",
-            "Content-Type": "text/plain; charset=utf-8"
-        }
-        
-        res = requests.post(influx_url, data=line_protocol_data.encode('utf-8'), headers=headers, timeout=5)
-        print(f" [Поток InfluxDB]: База ответила кодом: {res.status_code}")
-        if res.status_code == 204:
-            print(" [System Metrics & History]: Диалог и скорость успешно записаны в InfluxDB 3! 📊📝")
-    except Exception as ex:
-        print(f" [Ошибка логирования в InfluxDB]: {ex}")
-
-
-@app.post("/v1/chat/completions")
-def chat_completions(request: Request):
-    import asyncio
-    body = asyncio.run(request.json())
-    incoming_messages = body.get("messages", [])
+# =====================================================================
+# НАТИВНЫЙ ЧАТ OLLAMA С АВТО-КОНТЕКСТОМ СТРОК
+# =====================================================================
+@app.post("/api/chat")
+async def ollama_chat_endpoint(request: Request):
+    body = await request.json()
+    body["model"] = CHAT_MODEL
     
-    last_user_msg = ""
-    if incoming_messages:
-        raw_msg = incoming_messages[-1]
-        # Жестко проверяем: если пришел словарь, достаем 'content', иначе берем как строку
-        if isinstance(raw_msg, dict):
-            last_user_msg = str(raw_msg.get("content", "")).strip()
+    # 1. Загружаем характер из system_prompt.md
+    system_prompt_content = await load_system_prompt()
+    
+    # 2. КВАНТОВЫЙ ПЕРЕХВАТ КОНТЕКСТА: Сканируем входящий JSON на наличие открытого кода
+    active_code_context = ""
+    
+    # Способ А: Извлекаем из встроенного массива contextItems (если передан)
+    context_items = body.get("contextItems", [])
+    for item in context_items:
+        p_title = item.get("id", {}).get("providerTitle", "").lower()
+        if p_title in ["file", "code", "activefile", "currentfile"]:
+            f_name = item.get("name", "текущем файле")
+            f_content = item.get("content", "")
+            if f_content:
+                active_code_context += f"\n\n[Файл: {f_name}]\n{f_content}"
+
+    # Способ Б: Если Continue закинул выделенный код прямо в последнее сообщение пользователя
+    messages = body.get("messages", [])
+    if messages and messages[-1].get("role") == "user":
+        user_content = messages[-1].get("content", "")
+        # Если в промпте пользователя есть маркеры кода, но нет в системном, дублируем для Llama
+        if "```" in user_content and "--- Контекст" not in system_prompt_content:
+            print("🐾 [Context Sensor] Зафиксирован встроенный код в запросе пользователя!")
+
+    # 3. Накачиваем матрицу системного промпта актуальным файлом
+    if active_code_context:
+        print("🐾 [Context Sensor] Автоматически внедряю открытый файл в контекст Llama 3.1!")
+        system_prompt_content += (
+            f"\n\n⚠️ КВАНТОВЫЙ КОНТЕКСТ РАБОТЫ:"
+            f"\nПользователь прямо сейчас открыл в редакторе и редактирует следующий код:"
+            f"{active_code_context}\n"
+            f"Используй этот код для ответов, рефакторинга и поиска багов без лишних вопросов."
+        )
+
+    # 4. Внедряем склеенный промпт в массив сообщений Ollama
+    existing_system_msg = next((msg for msg in messages if msg.get("role") == "system"), None)
+    
+    if existing_system_msg:
+        existing_system_msg["content"] = f"{system_prompt_content}\n\n{existing_system_msg['content']}"
+    else:
+        messages.insert(0, {"role": "system", "content": system_prompt_content})
+        
+    body["messages"] = messages
+
+    # 5. Стримим ответ напрямую из контейнера Llama 3.1
+    async def stream_native_ollama():
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        native_ollama_url = CHAT_URL.replace("/v1", "")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", f"{native_ollama_url}/api/chat", json=body) as response:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(stream_native_ollama(), media_type="application/x-ndjson")
+
+# =====================================================================
+# НАТИВНОЕ АВТОДОПОЛНЕНИЕ OLLAMA (QWEN)
+# =====================================================================
+@app.post("/api/generate")
+async def ollama_autocomplete_endpoint(request: Request):
+    body = await request.json()
+    body["model"] = AUTO_MODEL
+    
+    native_qwen_url = AUTO_URL.replace("/v1", "") + "/api/generate"
+    
+    async def stream_native_auto():
+        timeout = httpx.Timeout(5.0, connect=1.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                async with client.stream("POST", native_qwen_url, json=body) as response:
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+            except Exception as e:
+                print(f"❌ [Qwen Generate Error] Ошибка стрима автокомплита: {e}")
+                yield b"{}\n"
+
+    return StreamingResponse(stream_native_auto(), media_type="application/x-ndjson")
+
+# =====================================================================
+# СИСТЕМНЫЙ ПЕРЕХВАТЧИК МЕТОДОВ (/api/show, /api/tags)
+# =====================================================================
+@app.post("/api/{path:path}")
+async def ollama_wildcard_catch(path: str, request: Request):
+    native_ollama_url = CHAT_URL.replace("/v1", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+
+    if body is not None:
+        if path == "show":
+            body["name"] = CHAT_MODEL
+            if "model" in body:
+                del body["model"]
         else:
-            last_user_msg = str(raw_msg).strip()
-        
-        # --- БЕЗОПАСНАЯ ОБРАБОТКА КОМАНДЫ /CLEAR ---
-        if last_user_msg == "/clear" or last_user_msg.startswith("/clear"):
-            from config import load_system_prompt
-            context.history = [{"role": "system", "content": load_system_prompt()}]
-            
-            def cmd_stream_clear():
-                chunk = {
-                    "id": "chatcmpl-cmd", "object": "chat.completion.chunk", "created": int(time.time()), "model": MODEL_NAME,
-                    "choices": [{"index": 0, "delta": {"content": "[Система]: Память диалога полностью очищена. Контекст сброшен! 🤖🍬\n"}, "finish_reason": "stop"}]
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-                yield "data: [DONE]\n\n"
-            print(" [Система]: Получена команда /clear. Память очищена.")
-            return StreamingResponse(cmd_stream_clear(), media_type="text/event-stream")
-        
-        if last_user_msg and not last_user_msg.startswith("/"):
-            context.add_message("user", last_user_msg)
-            
-    enriched_messages = context.get_context()
-    payload = {
-        "model": MODEL_NAME,
-        "messages": enriched_messages,
-        "stream": True,
-        "options": {
-            "num_ctx": NUM_CTX,
-            "temperature": 0.3
-        }
-    }
+            body["model"] = CHAT_MODEL
+            body["name"] = CHAT_MODEL
 
-    # ИСПРАВЛЕНО: Замораживаем снимок сообщения, отсекая пустые фоновые кадры Continue
-    user_msg_snapshot = str(last_user_msg).strip()
-
-    stream_queue = queue.Queue()
-
-    # Рабочий поток для изоляции блокирующих сетевых вызовов requests
-    def ollama_worker_thread(frozen_msg):
-        start_time = time.perf_counter()
-        token_count = 0
-        first_token_time = None
-        accumulated_response = ""
-        
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            response = requests.post(OLLAMA_HOST, json=payload, timeout=90, stream=True)
-            response.raise_for_status()
-            
-            for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8').strip()
-                    
-                    # УНИВЕРСАЛЬНЫЙ СТРИП: извлекаем чистый JSON независимо от формата плагина
-                    json_str = decoded_line
-                    if decoded_line.startswith("data: "):
-                        json_str = decoded_line[6:]
-                        
-                    if json_str == "[DONE]":
-                        stream_queue.put("data: [DONE]\n\n")
-                        break
-                        
-                    try:
-                        data = json.loads(json_str)
-                        # 1. Вариант OpenAI-формата (использует Continue)
-                        if "choices" in data and len(data["choices"]) > 0:
-                            delta = data["choices"][0].get("delta", {})
-                            token = delta.get("content", "")
-                        # 2. Вариант прямого формата Ollama
-                        else:
-                            token = data.get("response", "") or data.get("message", {}).get("content", "")
-                            
-                        if token:
-                            if first_token_time is None:
-                                        first_token_time = time.perf_counter() - start_time
-                            accumulated_response += token
-                            token_count += 1
-                    except Exception:
-                        pass
-                        
-                    # Пересылаем чанк в VS Code в том формате, в котором он пришел
-                    stream_queue.put(f"{decoded_line}\n\n" if decoded_line.startswith("data:") else f"data: {decoded_line}\n\n")
-
-                        
-            end_time = time.perf_counter()
-            total_generation_time = end_time - (start_time + (first_token_time or 0))
-            
-            speed = token_count / total_generation_time if token_count > 0 and total_generation_time > 0 else 72.50
-            lat = first_token_time if first_token_time else 0.35
-            
-            # ИСПРАВЛЕНО: Строго блокируем запись, если текст пуст или является командой
-            if frozen_msg and not frozen_msg.startswith("/"):
-                log_to_influxdb_worker(
-                    user_msg=frozen_msg,
-                    ai_msg=str(accumulated_response).strip(),
-                    speed=float(speed),
-                    lat=float(lat)
-                )
-                context.add_message("assistant", accumulated_response)
-                context.save_history_to_disk()
-            
+            res = await client.post(f"{native_ollama_url}/api/{path}", json=body)
+            return JSONResponse(content=res.json(), status_code=res.status_code)
         except Exception as e:
-            err_chunk = {
-                "id": "chatcmpl-err", "object": "chat.completion.chunk", "created": int(time.time()), "model": MODEL_NAME,
-                "choices": [{"index": 0, "delta": {"content": f"\n[Ошибка прокси]: {str(e)}"}, "finish_reason": "stop"}]
-            }
-            stream_queue.put(f"data: {json.dumps(err_chunk)}\n\n")
-            stream_queue.put("data: [DONE]\n\n")
-        finally:
-            stream_queue.put(None)
-
-    # Передаем изолированный СНИМОК сообщения
-    t = threading.Thread(target=ollama_worker_thread, args=(user_msg_snapshot,))
-    t.daemon = True
-    t.start()
-
-    def queue_consumer_generator():
-        while True:
-            chunk = stream_queue.get()
-            if chunk is None:
-                break
-            yield chunk
-
-    return StreamingResponse(queue_consumer_generator(), media_type="text/event-stream")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8977)

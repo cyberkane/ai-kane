@@ -1,100 +1,26 @@
 version: '3.8'
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_storage:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_FLASH_ATTENTION=1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    networks:
-      - ai-kane-net
-
   ai-agent:
     build: .
-    container_name: ai-kane-agent
+    container_name: ai_kane_agent
     ports:
-      - "8000:8000"
+      - "8977:8977"
     volumes:
       - .:/app
-    # ЖЕСТКИЙ ФИКС: Запускаем сервер через конкретную версию Python 3.14, где лежит hvac
-    command: python3.14 main.py
+    command: python main.py
+    env_file:
+      - .env
     environment:
-      - OLLAMA_HOST=http://ollama:11434/v1/chat/completions
-      - MODEL_NAME=llama3.1:8b
-    depends_on:
-      - ollama
-      - influxdb
+      - TZ=Europe/Ekaterinburg
+      - CHAT_LLM_URL=http://ai_ollama_core:11434/v1      # Будет резолвиться идеально!
+      - CHAT_MODEL=llama3.1:8b
+      - AUTOCOMPLETE_LLM_URL=http://ai_qwen_core:11434/v1 # Стыкуем со вторым контейнером
+      - AUTOCOMPLETE_MODEL=qwen2.5-coder:1.5b
+      - VAULT_URL=http://ai_vault_core:8200
     networks:
-      - ai-kane-net
-
-
-  # ИСПРАВЛЕННАЯ СВОБОДНАЯ INFLUXDB 3 CORE
-  influxdb:
-    image: influxdb:3-core
-    container_name: influxdb3_core
-    user: "root"
-    ports:
-      - "8181:8080"
-    volumes:
-      - influxdb3_storage:/var/lib/influxdb3/data
-    environment:
-      - INFLUXDB3_NODE_ID=node0
-      - INFLUXDB3_OBJECT_STORE=file
-      - INFLUXDB3_DATA_DIR=/var/lib/influxdb3/data
-      - INFLUXDB_INITIAL_ADMIN_TOKEN=apiv3_kane_secret_token_2026_secured
-    # Возвращаем явную команду запуска, чтобы поднять сетевой стек на порту 8080
-    command:
-      - influxdb3
-      - serve
-      - --node-id=node0
-      - --object-store=file
-      - --data-dir=/var/lib/influxdb3/data
-    networks:
-      - ai-kane-net
-
-  influxdb-ui:
-    image: influxdata/influxdb3-ui:1.9.0
-    container_name: influxdb3_explorer
-    ports:
-      - "8888:8080"
-    command:
-      - --mode=admin
-    depends_on:
-      - influxdb
-    networks:
-      - ai-kane-net
-
-  vault:
-    image: hashicorp/vault:1.15
-    container_name: ai_vault
-    ports:
-      - "8200:8200" # Открываем веб-интерфейс на порту 8200 вашего ПК
-    environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=kane-master-vault-token-2026 # Мастер-ключ для самого Vault
-      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
-    volumes:
-      - vault_storage:/vault/file
-    networks:
-      - ai-kane-net
-
-volumes:
-  ollama_storage:
-  influxdb3_storage:
-  vault_storage:
+      - ai-shared-net
 
 networks:
-  ai-kane-net:
-    driver: bridge
+  ai-shared-net:
+    external: true  # Указываем, что сеть создана в docker-compose.infra.yaml

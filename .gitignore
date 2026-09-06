@@ -13,3 +13,6 @@ cloned_repo/
 .venv
 venv/
 .vscode/
+
+# Секреты и переменные окружения
+.vault_token
