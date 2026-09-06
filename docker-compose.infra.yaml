@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # --- Модель OLLAMA ---
   ollama:
@@ -69,17 +67,27 @@ services:
   influxdb:
     image: influxdb:3-core
     container_name: influxdb3_core
+    user: "root"
     ports:
-      - "8181:8181"
+      - "8181:8080"  # На внешку отдаем 8181, внутри докер-сети слушаем 8080!
     volumes:
-      - influxdb3_storage:/var/lib/influxdb2
+      - influxdb3_storage:/var/lib/influxdb3/data
     environment:
+      - INFLUXDB3_NODE_ID=node0
+      - INFLUXDB3_OBJECT_STORE=file
+      - INFLUXDB3_DATA_DIR=/var/lib/influxdb3/data
+      - INFLUXDB_INITIAL_ADMIN_TOKEN=${INFLUX_ADMIN_TOKEN}
       - TZ=Europe/Ekaterinburg
-    restart: unless-stopped
+    command:
+      - influxdb3
+      - serve
+      - --node-id=node0
+      - --object-store=file
+      - --data-dir=/var/lib/influxdb3/data
     networks:
       - ai-shared-net
 
-  # --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС EXPLORER UI ---
+  # --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС GRAFANA ---
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
@@ -105,4 +113,4 @@ volumes:
 networks:
   ai-shared-net:
     driver: bridge
-    name: ai-shared-net # Создаем выделенную глобальную сеть Docker
+    name: ai-shared-net

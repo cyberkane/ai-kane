@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   ai-agent:
     build: .
@@ -9,18 +7,27 @@ services:
     volumes:
       - .:/app
     command: python main.py
+    # 🔑 Надежно подтягиваем секреты из локального .env файла
     env_file:
       - .env
     environment:
       - TZ=Europe/Ekaterinburg
-      - CHAT_LLM_URL=http://ai_ollama_core:11434/v1      # Будет резолвиться идеально!
+      - CHAT_LLM_URL=http://ai_ollama_core:11434/v1
       - CHAT_MODEL=llama3.1:8b
-      - AUTOCOMPLETE_LLM_URL=http://ai_qwen_core:11434/v1 # Стыкуем со вторым контейнером
+      - AUTOCOMPLETE_LLM_URL=http://ai_qwen_core:11434/v1
       - AUTOCOMPLETE_MODEL=qwen2.5-coder:1.5b
       - VAULT_URL=http://ai_vault_core:8200
+      - VAULT_DEV_ROOT_TOKEN_ID=${VAULT_MASTER_TOKEN}
+      - INFLUX_URL=http://influxdb3_core:8181
+      - INFLUX_TOKEN=${INFLUX_ADMIN_TOKEN}
+      - INFLUX_DATABASE=ai_kane_history
+      - INFLUX_ORG=marmai_planet
+    restart: unless-stopped
+    # Стыкуемся строго с единой внешней глобальной сетью
     networks:
       - ai-shared-net
 
 networks:
   ai-shared-net:
-    external: true  # Указываем, что сеть создана в docker-compose.infra.yaml
+    external: true
+    name: ai-shared-net

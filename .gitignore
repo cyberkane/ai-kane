@@ -1,18 +1,24 @@
-# Кэш Python (Блокируем ложные подсказки копайлота)
+# Секреты и токены экосистемы (КРИТИЧЕСКИ ВАЖНО)
+.env
+auth.json
+infra/auth.json
+
+# Кэш Python и Docker
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
+.pytest_cache/
+.dockerignore
 
-# Локальные логи и клонированные репозитории
-logs/
-cloned_repo/
-
-# Временные файлы окружения и IDE
-.env
-.venv
+# Виртуальное окружение
 venv/
-.vscode/
+.venv/
 
-# Секреты и переменные окружения
-.vault_token
+# Системные файлы Windows
+Thumbs.db
+Desktop.ini
+
+# Документация
+system_prompt.md
+
+# Логи
+logs/
