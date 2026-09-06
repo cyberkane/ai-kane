@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  ai-agent:
+    build: .
+    container_name: ai_kane_agent
+    ports:
+      - "8977:8977"
+    volumes:
+      - .:/app
+    command: python main.py
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Ekaterinburg
+      - CHAT_LLM_URL=http://ai_ollama_core:11434/v1      # Будет резолвиться идеально!
+      - CHAT_MODEL=llama3.1:8b
+      - AUTOCOMPLETE_LLM_URL=http://ai_qwen_core:11434/v1 # Стыкуем со вторым контейнером
+      - AUTOCOMPLETE_MODEL=qwen2.5-coder:1.5b
+      - VAULT_URL=http://ai_vault_core:8200
+    networks:
+      - ai-shared-net
+
+networks:
+  ai-shared-net:
+    external: true  # Указываем, что сеть создана в docker-compose.infra.yaml

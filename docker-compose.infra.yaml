@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  # --- Модель OLLAMA ---
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai_ollama_core
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_storage:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - ai-shared-net
+  
+    # --- Модель QWEN ---
+  qwen:
+    image: ollama/ollama:latest
+    container_name: ai_qwen_core
+    ports:
+      - "11438:11434"
+    volumes:
+      - qwen_storage:/root/.ollama
+    environment:
+      - TZ=Europe/Ekaterinburg
+      - OLLAMA_NUM_PARALLEL=4
+    networks:
+      - ai-shared-net
+    entrypoint: [ "/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull qwen2.5-coder:1.5b && tail -f /dev/null" ]
+
+    # --- KOKORO TTS ---
+  kokoro-tts:
+    image: hwdsl2/kokoro-server:latest
+    container_name: kokoro-tts
+    ports:
+      - "11436:8880"
+    volumes:
+      - kokoro-cache:/root/.cache
+    environment:
+      - TZ=Europe/Ekaterinburg
+    restart: unless-stopped
+    networks:
+      - ai-shared-net
+
+  # --- ХРАНИЛИЩЕ СЕКРЕТОВ HASHICORP VAULT (ПЕРМАНЕНТНОЕ) ---
+  vault:
+    image: hashicorp/vault:1.15
+    container_name: ai_vault_core
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=${VAULT_MASTER_TOKEN}
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+      - TZ=Europe/Ekaterinburg
+    volumes:
+      - vault_storage:/vault/file
+    restart: unless-stopped
+    networks:
+      - ai-shared-net
+
+  # --- ЯДРО БАЗЫ ДАННЫХ INFLUXDB 3 CORE ---
+  influxdb:
+    image: influxdb:3-core
+    container_name: influxdb3_core
+    ports:
+      - "8181:8181"
+    volumes:
+      - influxdb3_storage:/var/lib/influxdb2
+    environment:
+      - TZ=Europe/Ekaterinburg
+    restart: unless-stopped
+    networks:
+      - ai-shared-net
+
+  # --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС EXPLORER UI ---
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin # Пароль администратора при первом входе
+      - TZ=Europe/Ekaterinburg
+    restart: unless-stopped
+    networks:
+      - ai-shared-net
+
+volumes:
+  ollama_storage:
+  qwen_storage:
+  kokoro-cache:
+  influxdb3_storage:
+  vault_storage:
+  grafana-storage:
+
+networks:
+  ai-shared-net:
+    driver: bridge
+    name: ai-shared-net # Создаем выделенную глобальную сеть Docker
