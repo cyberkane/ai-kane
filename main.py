@@ -89,7 +89,7 @@ async def ollama_chat_gateway(request: dict):
     
     # 🔥 КРИТИЧЕСКИ ВАЖНО ДЛЯ ХАРАКТЕРА: Поднимаем температуру и креативность,
     # иначе Llama будет игнорировать художественную часть системного промпта!
-    options["temperature"] = 0.85
+    options["temperature"] = 0.78
     options["top_p"] = 0.9
     options["presence_penalty"] = 0.6  # Стимулирует модель использовать новые мармеладные метафоры
     
