@@ -1,5 +1,15 @@
+netcat
 fastapi
 uvicorn
-httpx
+requests
 hvac
 aiofiles
+llama-index-core
+llama-index-llms-ollama
+langgraph
+langgraph-checkpoint-redis
+redis
+opentelemetry-api 
+opentelemetry-sdk 
+opentelemetry-exporter-otlp-proto-grpc
+python-dotenv

@@ -1,7 +1,5 @@
 # Секреты и токены экосистемы (КРИТИЧЕСКИ ВАЖНО)
 .env
-auth.json
-infra/auth.json
 
 # Кэш Python и Docker
 __pycache__/
@@ -12,13 +10,6 @@ __pycache__/
 # Виртуальное окружение
 venv/
 .venv/
-
-# Системные файлы Windows
-Thumbs.db
-Desktop.ini
-
-# Документация
-system_prompt.md
-
-# Логи
-logs/
+sonar-project.properties
+.github/
+github/
