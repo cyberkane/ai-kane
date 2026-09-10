@@ -37,21 +37,38 @@ class AgentState(TypedDict):
 
 # --- 3. АСИНХРОННЫЙ УЗЕЛ МОДЕЛИ (NODES) ---
 async def call_model(state: AgentState):
-    """Асинхронный узел, преобразующий состояние графа в формат Ollama API."""
+    """Асинхронный узел, который гарантированно внедряет актуальный промпт из MinIO."""
     OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ai_ollama_core:11434")
     MODEL_NAME = os.getenv("CHAT_MODEL", "llama3.1:8b")
     
+    # 1. Инициализируем массив сообщений для Ollama
     ollama_messages = []
     
-    # Парсим историю сообщений графа в формат, понятный Ollama
+    # ➕ 2. ЖЕСТКО внедряем системный промпт из MinIO на САМОЕ ПЕРВОЕ МЕСТО
+    from main import agent_system_prompt
+    if agent_system_prompt:
+        ollama_messages.append({"role": "system", "content": agent_system_prompt})
+    else:
+        # Резервный промпт на случай, если MinIO упадет
+        ollama_messages.append({
+            "role": "system", 
+            "content": "Ты — продвинутый локальный ИИ-помощник по имени MarmAI."
+        })
+    
+    # 3. Добавляем всю остальную историю диалога из состояния графа
+    from langchain_core.messages import HumanMessage, AIMessage
+    
     for msg in state.get("messages", []):
-        if isinstance(msg, HumanMessage) or msg.__class__.__name__ == "HumanMessage":
+        # Игнорируем SystemMessage, если они случайно попали в историю графа, 
+        # так как мы уже добавили главный промпт выше
+        if msg.__class__.__name__ == "SystemMessage":
+            continue
+        elif isinstance(msg, HumanMessage) or msg.__class__.__name__ == "HumanMessage":
             ollama_messages.append({"role": "user", "content": msg.content})
         elif isinstance(msg, AIMessage) or msg.__class__.__name__ == "AIMessage":
             ollama_messages.append({"role": "assistant", "content": msg.content})
             
     try:
-        # Отправляем асинхронный неблокирующий запрос к Ollama
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
@@ -66,15 +83,11 @@ async def call_model(state: AgentState):
             result = response.json()
             
         content = result.get("message", {}).get("content", "")
-        if not content:
-            content = "[Модель вернула пустой ответ]"
-            
         return {"messages": [AIMessage(content=content)]}
         
     except Exception as exc:
         logger.error(f"Ошибка внутри асинхронного узла call_model: {exc}")
-        # Возвращаем ошибку в граф текстом, чтобы избежать аварийной остановки сервера
-        return {"messages": [AIMessage(content=f"Ошибка генерации Ollama: {str(exc)}")]}
+        return {"messages": [AIMessage(content=f"Ошибка генерации: {str(exc)}")]}
 
 
 # --- 4. ОПРЕДЕЛЕНИЕ УСЛОВНЫХ ПЕРЕХОДОВ (ROUTING) ---
