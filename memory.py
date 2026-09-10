@@ -20,12 +20,13 @@ except ConnectionError as ce:
     logger.error(f"Не удалось подключиться к Dragonfly (Синхронно): {ce}")
     redis_client = None
 
-# 2. Асинхронный чекпоинтер для будущего LangGraph
+# --- 2. АСИНХРОННЫЙ ЧЕКПОИНТЕР ДЛЯ LANGGRAPH ---
 try:
     logger.info("Инициализация асинхронного чекпоинтера LangGraph...")
-    # Создаем асинхронный клиент, который требует библиотека RedisSaver
-    async_redis_client = AsyncRedis.from_url(DRAGONFLY_URL, decode_responses=True)
-    langgraph_checkpointer = RedisSaver(async_redis_client)
+    
+    # ПЕРЕДАЕМ СТРОКУ URL НАПРЯМУЮ, библиотека сама сделает startswith() для проверки протокола
+    langgraph_checkpointer = RedisSaver(DRAGONFLY_URL)
+    
     logger.info("Чекпоинтер LangGraph успешно создан")
 except Exception as e:
     logger.error(f"Не удалось инициализировать RedisSaver для LangGraph: {e}")
