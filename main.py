@@ -157,11 +157,11 @@ async def ollama_chat_gateway(request: dict):
     user_text = ""
     for msg in reversed(incoming_messages):
         if msg.get("role") == "user":
-            user_text = msg.get("content", "").lower()
+            user_text = msg.get("content", "")
             break
 
-    # 🚀 АВТОНОМНЫЙ ПЕРЕХВАТ ИНСТРУМЕНТОВ С ЭМУЛЯЦИЕЙ МАРМЕЛАДНОГО СТРИМИНГА
-    if any(word in user_text for word in ["время", "дата", "часы", "лог", "контейнер"]):
+    # 🚀 АВТОНОМНЫЙ ПЕРЕХВАТ ИНСТРУМЕНТОВ
+    if any(word in user_text.lower() for word in ["время", "дата", "часы", "лог", "контейнер"]):
         from langchain_core.messages import HumanMessage
         from datetime import datetime
         print("🤖 [MarmAI Gateway] Перенаправление запроса в автономный граф инструментов...")
@@ -173,18 +173,15 @@ async def ollama_chat_gateway(request: dict):
             "current_tool": "", "tool_input": "", "tool_output": "", "tool_call_id": ""
         }
         
-        # Выполняем наш многошаговый граф (вызов -> системная утилита -> ответ)
         output = await tools_agent_app.ainvoke(inputs)
         final_bot_response = output["messages"][-1].content
         
         current_iso_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         
-        # 🔄 СОЗДАЕМ ПОТОКОВЫЙ ГЕНЕРАТОР: разбиваем готовый текст на слова/токены для Continue
         async def tools_stream_chunk_generator():
             words = final_bot_response.split(" ")
             for i, word in enumerate(words):
                 display_content = word if i == 0 else " " + word
-                
                 chunk_payload = {
                     "model": model_name,
                     "created_at": current_iso_time,
@@ -194,27 +191,48 @@ async def ollama_chat_gateway(request: dict):
                 yield json.dumps(chunk_payload, ensure_ascii=False) + "\n"
                 await asyncio.sleep(0.02)
                 
-            # 🎯 ФИКС: Обязательно передаем объект message в закрывающий чанк!
             final_payload = {
                 "model": model_name,
                 "created_at": current_iso_time,
-                "message": {"role": "assistant", "content": ""}, # <-- Заглушка для предотвращения TypeError
+                "message": {"role": "assistant", "content": ""},
                 "done": True
             }
             yield json.dumps(final_payload, ensure_ascii=False) + "\n"
 
-        # 🎯 Возвращаем легальный StreamingResponse, который Continue примет с радостью!
         return StreamingResponse(tools_stream_chunk_generator(), media_type="application/x-ndjson")
+
+    # ➕ 2. СЕМАНТИЧЕСКИЙ ПОИСК КОНТЕКСТА В QDRANT (ИСПРАВЛЕНО: везде используем user_text!)
+    rag_context = ""
+    if user_text:
+        try:
+            from vector_storage import search_similar_knowledge
+            # Ищем топ-2 релевантных документа в векторной базе знаний Qdrant
+            rag_context = await search_similar_knowledge(user_text, limit=2)
+        except Exception as rag_err:
+            print(f"⚠️ [System] Ошибка RAG извлечения: {rag_err}")
+
+    # 3. Склеиваем базовую личность котика из MinIO и найденный в Qdrant контекст знаний
+    full_system_context = agent_system_prompt
+    if rag_context:
+        full_system_context += (
+            "\n\n# 📚 ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ QDRANT:\n"
+            "Используй эти точные инженерные данные при формировании ответа:\n"
+            f"{rag_context}"
+        )
+
+    # Добавляем итоговый обогащенный системный промпт на первое место в массив
+    if full_system_context:
+        final_messages.append({"role": "system", "content": full_system_context})
 
     start_time = time.time()
     
     # СЕМАНТИЧЕСКИЙ ПОИСК КОНТЕКСТА В QDRANT
     rag_context = ""
-    if user_query:
+    if user_text:
         try:
             from vector_storage import search_similar_knowledge
             # Ищем топ-2 релевантных документа в базе знаний
-            rag_context = await search_similar_knowledge(user_query, limit=2)
+            rag_context = await search_similar_knowledge(user_text, limit=2)
         except Exception as rag_err:
             print(f"⚠️ [System] Ошибка RAG извлечения: {rag_err}")
 
