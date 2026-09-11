@@ -14,3 +14,6 @@ opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-grpc
 python-dotenv
 boto3
+influxdb3-python
+qdrant_client
+asyncio

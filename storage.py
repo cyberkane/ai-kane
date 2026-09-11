@@ -16,7 +16,7 @@ def get_s3_client():
         aws_access_key_id=MINIO_ROOT_USER,
         aws_secret_access_key=MINIO_ROOT_PASSWORD,
         config=Config(signature_version="s3v4"),
-        region_name="us-east-1"
+        region_name="ru-east-1"
     )
 
 def init_prompt_storage():

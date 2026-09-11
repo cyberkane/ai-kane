@@ -7,7 +7,6 @@ from langgraph.checkpoint.redis import RedisSaver
 
 logger = logging.getLogger("vault-loader")
 
-# Загружаем URL Dragonfly из .env (формат: redis://127.0.0.1:6379 или redis://ai_dragonfly:6379)
 DRAGONFLY_URL = os.getenv("DRAGONFLY_URL", "redis://ai_dragonfly:6379")
 
 # 1. Синхронный клиент для текущей работы с историей диалогов в FastAPI
@@ -23,8 +22,7 @@ except ConnectionError as ce:
 # --- 2. АСИНХРОННЫЙ ЧЕКПОИНТЕР ДЛЯ LANGGRAPH ---
 try:
     logger.info("Инициализация асинхронного чекпоинтера LangGraph...")
-    
-    # ПЕРЕДАЕМ СТРОКУ URL НАПРЯМУЮ, библиотека сама сделает startswith() для проверки протокола
+
     langgraph_checkpointer = RedisSaver(DRAGONFLY_URL)
     
     logger.info("Чекпоинтер LangGraph успешно создан")
