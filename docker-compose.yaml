@@ -1,26 +1,44 @@
-version: '3.8'
-
 services:
   ai-agent:
     build: .
     container_name: ai_kane_agent
     ports:
-      - "8977:8977"
-    volumes:
-      - .:/app
-    command: python main.py
-    env_file:
-      - .env
+      - "8000:8000"
     environment:
       - TZ=Europe/Ekaterinburg
-      - CHAT_LLM_URL=http://ai_ollama_core:11434/v1      # Будет резолвиться идеально!
-      - CHAT_MODEL=llama3.1:8b
-      - AUTOCOMPLETE_LLM_URL=http://ai_qwen_core:11434/v1 # Стыкуем со вторым контейнером
-      - AUTOCOMPLETE_MODEL=qwen2.5-coder:1.5b
-      - VAULT_URL=http://ai_vault_core:8200
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+    env_file:
+      - .env
+    external_links:
+      - "minio_core:minio-core"
     networks:
-      - ai-shared-net
+      - docker-net
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: ai_dragonfly
+    # Ограничиваем память, если нужно (например, --maxmemory=2gb)
+    command: ["--logtostderr", "--bind", "0.0.0.0"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - dragonfly_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - docker-net
+
+volumes:
+  dragonfly_data:
 
 networks:
-  ai-shared-net:
-    external: true  # Указываем, что сеть создана в docker-compose.infra.yaml
+  docker-net:
+    external: true

@@ -1,18 +1,15 @@
-# Кэш Python (Блокируем ложные подсказки копайлота)
+# Секреты и токены экосистемы (КРИТИЧЕСКИ ВАЖНО)
+.env
+
+# Кэш Python и Docker
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
+.pytest_cache/
+.dockerignore
 
-# Локальные логи и клонированные репозитории
-logs/
-cloned_repo/
-
-# Временные файлы окружения и IDE
-.env
-.venv
+# Виртуальное окружение
 venv/
-.vscode/
-
-# Секреты и переменные окружения
-.vault_token
+.venv/
+sonar-project.properties
+.github/
+github/
