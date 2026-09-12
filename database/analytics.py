@@ -1,6 +1,6 @@
 import os
 from influxdb_client_3 import InfluxDBClient3, Point
-from telemetry import logger
+from metrics.telemetry import logger
 
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb3_core:8181")
 INFLUX_TOKEN = os.getenv("INFLUX_BOOTSTRAP_TOKEN", "apiv3_wyuoazW6_gobjHm2EzI-4HD7syNABkG6gWOw4p3loAlGjlK1uzbMVYDdx-44_ZLzKf_JK0Ro6zkOHbgOo8RNHw")

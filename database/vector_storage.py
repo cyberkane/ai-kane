@@ -2,7 +2,7 @@ import os
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
-from telemetry import logger
+from metrics.telemetry import logger
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant_core:6333")
 # Для внутренней Docker-сети используем оригинальный порт Ollama

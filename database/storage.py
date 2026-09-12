@@ -2,7 +2,7 @@ import os
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
-from telemetry import logger # Используем глобальный логгер экосистемы
+from metrics.telemetry import logger # Используем глобальный логгер экосистемы
 
 MINIO_ENDPOINT = os.getenv("MINIO_URL", "http://minio-core:9000")
 MINIO_ROOT_USER = os.getenv("MINIO_ROOT_USER", "marmai")

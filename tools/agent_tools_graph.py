@@ -10,7 +10,7 @@ from typing import TypedDict, Annotated, Sequence
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-from telemetry import logger
+from metrics.telemetry import logger
 from analytics import log_agent_telemetry
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ai_ollama_core:11435")

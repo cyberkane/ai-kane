@@ -1,7 +1,7 @@
-netcat
 fastapi
 uvicorn
 requests
+configparser
 hvac
 aiofiles
 llama-index-core
@@ -18,3 +18,4 @@ influxdb3-python
 qdrant_client
 asyncio
 pytest
+python-dotenv

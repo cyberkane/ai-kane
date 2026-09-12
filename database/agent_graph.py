@@ -10,7 +10,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 # Используем стабильный in-memory чекпоинтер для сохранения состояний графа
 from langgraph.checkpoint.memory import MemorySaver 
-from telemetry import logger
+from metrics.telemetry import logger
 
 # --- 1. ОПРЕДЕЛЕНИЕ ИНСТРУМЕНТОВ (TOOLS) ---
 @tool
@@ -44,7 +44,6 @@ async def call_model(state: AgentState):
     # 1. Инициализируем массив сообщений для Ollama
     ollama_messages = []
     
-    # ➕ 2. ЖЕСТКО внедряем системный промпт из MinIO на САМОЕ ПЕРВОЕ МЕСТО
     from main import agent_system_prompt
     if agent_system_prompt:
         ollama_messages.append({"role": "system", "content": agent_system_prompt})

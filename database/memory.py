@@ -1,7 +1,7 @@
 import os
 import json
 import redis.asyncio as aioredis
-from telemetry import logger
+from metrics.telemetry import logger
 
 # Подключаемся к Dragonfly по внутреннему DNS имени Docker-сети
 DRAGONFLY_URL = os.getenv("DRAGONFLY_URL", "redis://ai_dragonfly:6379/0")

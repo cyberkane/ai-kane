@@ -1,7 +1,7 @@
 services:
   ai-agent:
     build: .
-    container_name: ai_kane_agent
+    container_name: ai_agent
     ports:
       - "8000:8000"
     environment:
@@ -23,7 +23,7 @@ services:
 
   dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
-    container_name: ai_dragonfly
+    container_name: dragonfly
     # Ограничиваем память, если нужно (например, --maxmemory=2gb)
     command: ["--logtostderr", "--bind", "0.0.0.0"]
     ports:
@@ -39,8 +39,23 @@ services:
     networks:
       - docker-net
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333" # HTTP API
+      - "6334:6334" # gRPC API (для быстрой работы через библиотеки)
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - TZ=Europe/Ekaterinburg
+    restart: unless-stopped
+    networks:
+      - docker-net
+
 volumes:
   dragonfly_data:
+  qdrant_storage:
 
 networks:
   docker-net:
