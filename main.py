@@ -80,7 +80,7 @@ class FileActivityRequest(BaseModel):
     lines_changed: int = 0
     file_size_bytes: int = 0
 
-class VCSHistoryRequest(BaseModel):
+class VcsCommitRequest(BaseModel):
     project_id: str
     commit_hash: str
     author: str
@@ -128,40 +128,33 @@ app.include_router(autocomplete.router)
 # ЭНДПОИНТ ДЛЯ ЧАТА
 @app.post("/api/chat")
 async def ollama_chat_gateway(request: dict):
-    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ai_ollama_core:11435")
-    
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ai_ollama_core:11434")
     session_id = request.get("session_id", "vs_code_session")
-    
     model_name = request.get("model", "llama3.1:8b")
     incoming_messages = request.get("messages", [])
     should_stream = request.get("stream", True)
     
-    options = request.get("options", {})
-    options["temperature"] = 0.75
-    options["top_p"] = 0.9
-    options["presence_penalty"] = 0.6  
+    # --- 🔄 ИСПРАВЛЕННАЯ СИНХРОНИЗАЦИЯ ПАМЯТИ DRAGONFLY ---
+    from memory import get_chat_history, save_chat_history
     
-    final_messages = []
-    if agent_system_prompt:
-        final_messages.append({"role": "system", "content": agent_system_prompt})
-        
-    prompt_characters = 0
-    for msg in incoming_messages:
-        if msg.get("role") != "system":
-            final_messages.append(msg)
-            prompt_characters += len(msg.get("content", ""))
-            
-    prompt_tokens = max(1, prompt_characters // 4)
+    # 1. Если Continue прислал свежие сообщения, берем их за основу (чтобы избежать дублирования)
+    if incoming_messages:
+        cached_history = [msg for msg in incoming_messages if msg.get("role") != "system"]
+    else:
+        # Если почему-то пришел пустой пакет, берем данные из Dragonfly
+        cached_history = await get_chat_history(session_id)
     
-    # Вытаскиваем текущую реплику пользователя для RAG-анализа
+    # 2. Вытаскиваем текст самой последней реплики разработчика для RAG и инструментов
     user_text = ""
-    for msg in reversed(incoming_messages):
+    for msg in reversed(cached_history):
         if msg.get("role") == "user":
             user_text = msg.get("content", "")
             break
 
     # 🚀 АВТОНОМНЫЙ ПЕРЕХВАТ ИНСТРУМЕНТОВ
-    if any(word in user_text.lower() for word in ["время", "дата", "часы", "лог", "контейнер"]):
+    trigger_words = ["время", "дата", "часы", "лог", "контейнер", "тест", "тесты", "статус", "инфраструктура"]
+    
+    if any(word in user_text.lower() for word in trigger_words):
         from langchain_core.messages import HumanMessage
         from datetime import datetime
         print("🤖 [MarmAI Gateway] Перенаправление запроса в автономный граф инструментов...")
@@ -177,6 +170,11 @@ async def ollama_chat_gateway(request: dict):
         final_bot_response = output["messages"][-1].content
         
         current_iso_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        
+        # Сохраняем результат в историю Dragonfly, чтобы котик не забывал контекст
+        cached_history.append({"role": "assistant", "content": final_bot_response})
+        from memory import save_chat_history
+        await save_chat_history(session_id, cached_history)
         
         async def tools_stream_chunk_generator():
             words = final_bot_response.split(" ")
@@ -201,73 +199,32 @@ async def ollama_chat_gateway(request: dict):
 
         return StreamingResponse(tools_stream_chunk_generator(), media_type="application/x-ndjson")
 
-    # ➕ 2. СЕМАНТИЧЕСКИЙ ПОИСК КОНТЕКСТА В QDRANT (ИСПРАВЛЕНО: везде используем user_text!)
+    # 📚 СЕМАНТИЧЕСКИЙ ПОИСК В QDRANT (RAG)
     rag_context = ""
     if user_text:
         try:
             from vector_storage import search_similar_knowledge
-            # Ищем топ-2 релевантных документа в векторной базе знаний Qdrant
             rag_context = await search_similar_knowledge(user_text, limit=2)
         except Exception as rag_err:
             print(f"⚠️ [System] Ошибка RAG извлечения: {rag_err}")
 
-    # 3. Склеиваем базовую личность котика из MinIO и найденный в Qdrant контекст знаний
+    # Сборка финального пакета для Ollama
+    final_messages = []
     full_system_context = agent_system_prompt
     if rag_context:
         full_system_context += (
             "\n\n# 📚 ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ QDRANT:\n"
-            "Используй эти точные инженерные данные при формировании ответа:\n"
             f"{rag_context}"
         )
 
-    # Добавляем итоговый обогащенный системный промпт на первое место в массив
     if full_system_context:
         final_messages.append({"role": "system", "content": full_system_context})
-
-    start_time = time.time()
-    
-    # СЕМАНТИЧЕСКИЙ ПОИСК КОНТЕКСТА В QDRANT
-    rag_context = ""
-    if user_text:
-        try:
-            from vector_storage import search_similar_knowledge
-            # Ищем топ-2 релевантных документа в базе знаний
-            rag_context = await search_similar_knowledge(user_text, limit=2)
-        except Exception as rag_err:
-            print(f"⚠️ [System] Ошибка RAG извлечения: {rag_err}")
-
-    # Склеиваем базовую личность из MinIO и найденный в Qdrant контекст!
-    full_system_context = agent_system_prompt
-    if rag_context:
-        full_system_context += (
-            "\n\n# 📚 ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ QDRANT:\n"
-            "Используй эти точные инженерные данные при формировании ответа:\n"
-            f"{rag_context}"
-        )
-
-    # Добавляем итоговый обогащенный системный промпт на первое место
-    if full_system_context:
-        final_messages.append({"role": "system", "content": full_system_context})
-    
-    if agent_system_prompt:
-        final_messages.append({"role": "system", "content": agent_system_prompt})
         
-    prompt_characters = 0
-    for msg in incoming_messages:
-        if msg.get("role") != "system":
-            final_messages.append(msg)
-            prompt_characters += len(msg.get("content", ""))
+    # Добавляем чистую историю без дубликатов
+    final_messages.extend(cached_history)
             
-    prompt_tokens = max(1, prompt_characters // 4)
-    session_id = request.get("session_id", "vs_code_session")
-    
     start_time = time.time()
-    ollama_payload = {
-        "model": model_name, 
-        "messages": final_messages, 
-        "stream": True,
-        "options": options 
-    }
+    ollama_payload = {"model": model_name, "messages": final_messages, "stream": True}
     input_json_str = json.dumps(incoming_messages, ensure_ascii=False)
 
     async def stream_generator():
@@ -277,12 +234,7 @@ async def ollama_chat_gateway(request: dict):
         error_msg = ""
         try:
             async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST", 
-                    f"{OLLAMA_URL}/api/chat", 
-                    json=ollama_payload,
-                    timeout=60.0
-                ) as response:
+                async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=ollama_payload, timeout=60.0) as response:
                     async for chunk in response.aiter_lines():
                         if chunk:
                             try:
@@ -290,60 +242,44 @@ async def ollama_chat_gateway(request: dict):
                                 content_chunk = chunk_data.get("message", {}).get("content", "")
                                 response_characters += len(content_chunk)
                                 full_response_text += content_chunk
-                            except:
-                                pass
+                            except: pass
                             yield chunk + "\n"
         except Exception as e:
             status = "error"
             error_msg = str(e)
             raise e
         finally:
+            # Обновляем историю в Dragonfly только при успешном завершении стрима
+            if status == "success" and full_response_text:
+                cached_history.append({"role": "assistant", "content": full_response_text})
+                import asyncio
+                asyncio.create_task(save_chat_history(session_id, cached_history))
+
             latency_ms = int((time.time() - start_time) * 1000)
             completion_tokens = response_characters // 4
-            
             from analytics import log_agent_telemetry
             import asyncio
             asyncio.create_task(
                 log_agent_telemetry(
-                    session_id=session_id,
-                    graph_name="vs_code_gateway_flow",
-                    node_name="ollama_chat_node",
-                    model_name=model_name,
-                    status=status,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    latency_ms=latency_ms,
-                    input_payload=input_json_str,
-                    output_payload=full_response_text,
-                    error_message=error_msg
+                    session_id=session_id, graph_name="vs_code_gateway_flow", node_name="ollama_chat_node",
+                    model_name=model_name, status=status, prompt_tokens=max(1, len(user_text)//4), completion_tokens=completion_tokens,
+                    latency_ms=latency_ms, input_payload=input_json_str, output_payload=full_response_text, error_message=error_msg
                 )
             )
 
     if should_stream:
         return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
         
-    ollama_payload["stream"] = False
+    # Блок одиночного (не-стрим) запроса
     async with httpx.AsyncClient() as client:
         res = await client.post(f"{OLLAMA_URL}/api/chat", json=ollama_payload, timeout=60.0)
         result_json = res.json()
-        
-        latency_ms = int((time.time() - start_time) * 1000)
         response_text = result_json.get("message", {}).get("content", "")
-        completion_tokens = len(response_text) // 4
         
-        from analytics import log_agent_telemetry
-        await log_agent_telemetry(
-            session_id=session_id,
-            graph_name="vs_code_gateway_flow",
-            node_name="ollama_chat_node",
-            model_name=model_name,
-            status="success",
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            latency_ms=latency_ms,
-            input_payload=input_json_str,
-            output_payload=response_text
-        )
+        if response_text:
+            cached_history.append({"role": "assistant", "content": response_text})
+            await save_chat_history(session_id, cached_history)
+            
         return result_json
 
 @app.post("/api/v1/ide/event")
@@ -385,18 +321,19 @@ async def delete_session(session_id: str):
 
 # ЭНДПОИНТ ДЛЯ ИСТОРИИ КОММИТОВ
 @app.post("/api/v1/vcs/commit")
-async def receive_vcs_commit(payload: VCSHistoryRequest):
+async def receive_vcs_commit(payload: VcsCommitRequest):
     logger.info(
-        f"Git Commit Hook: {payload.commit_hash} в ветке {payload.branch}", 
-        extra={"project_id": payload.project_id, "author": payload.author}
+        f"Git Commit: [{payload.branch}] {payload.commit_hash} от {payload.author}", 
+        extra={"commit": payload.commit_hash, "author": payload.author}
     )
-    print(f"📦 [System] Принят лог коммита {payload.commit_hash} от {payload.author}...")
+    print(f"📋 [VCS Gateway] Получен новый коммит: {payload.commit_hash}. Запись в vcs_history...")
     
     try:
+        # Импортируем функцию записи в четвертую таблицу аналитики
         from analytics import log_vcs_history
         import asyncio
         
-        # Асинхронно перенаправляем данные коммита в InfluxDB 3 на порт 8181
+        # Асинхронно отправляем точку в InfluxDB 3 на порт 8181
         asyncio.create_task(
             log_vcs_history(
                 project_id=payload.project_id,
@@ -410,9 +347,10 @@ async def receive_vcs_commit(payload: VCSHistoryRequest):
                 deletions=payload.deletions
             )
         )
-        return {"status": "success", "message": "Данные VCS успешно зафиксированы в InfluxDB 3"}
+        return {"status": "success", "message": f"Коммит {payload.commit_hash} успешно залогирован в vcs_history"}
+        
     except Exception as e:
-        logger.error(f"Ошибка обработки Git-метрики: {e}")
+        logger.error(f"❌ Ошибка эндпоинта VCS коммитов: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")

@@ -7,6 +7,9 @@ services:
     environment:
       - TZ=Europe/Ekaterinburg
       - PYTHONUNBUFFERED=1
+      - VAULT_MASTER_TOKEN=${VAULT_MASTER_TOKEN}
+      - INFLUX_BOOTSTRAP_TOKEN=${INFLUX_BOOTSTRAP_TOKEN}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
     volumes:
       - .:/app
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload

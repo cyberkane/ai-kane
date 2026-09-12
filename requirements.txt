@@ -17,3 +17,4 @@ boto3
 influxdb3-python
 qdrant_client
 asyncio
+pytest
