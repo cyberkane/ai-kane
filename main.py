@@ -17,6 +17,7 @@ from functions.chat import router as chat_router
 from functions.autocomplete import router as autocomplete_router
 from functions.embedder import router as embedder_router
 from functions.health import router as health_router
+from database.vector_storage import init_qdrant_collection
 
 load_dotenv()
 app_config = {}
@@ -55,21 +56,21 @@ async def lifespan(app: FastAPI):
     monitoring_cfg = app_config.get('monitoring')
     
     if monitoring_cfg:
-        otel_host = monitoring_cfg['host']
-        otel_port = monitoring_cfg['port']
-        
-        # Инициализируем и отправляем лог
-        init_otel_logging(otel_host, otel_port)
-        log_event(
-            body="Configuration successfully loaded into memory",
-            event_name="config_loaded",
-            attributes={
-                "loaded_sections_count": len(app_config.keys()),
-                "status": "success"
-            }
-        )
-    else:
-        print("=== [ВНИМАНИЕ] Секция [monitoring] не найдена в config.ini. Телеметрия отключена. ===")
+        try:
+            init_otel_logging(monitoring_cfg['host'], monitoring_cfg['port'])
+            log_event(
+                body="Configuration successfully loaded into memory",
+                event_name="config_loaded",
+                attributes={
+                    "loaded_sections_count": len(app_config.keys()),
+                    "status": "success"
+                }
+            )
+            
+        except Exception as e:
+            print(f"=== [Ошибка Телеметрии при старте] {e} ===")
+
+    await init_qdrant_collection()
 
     yield  # В этой точке приложение работает и принимает запросы
     # Логирование остановки приложения (код сработает после выключения сервера)
