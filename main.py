@@ -18,6 +18,7 @@ from functions.autocomplete import router as autocomplete_router
 from functions.embedder import router as embedder_router
 from functions.health import router as health_router
 from database.vector_storage import init_qdrant_collection
+from database.storage import init_prompt_storage
 
 load_dotenv()
 app_config = {}
@@ -69,9 +70,13 @@ async def lifespan(app: FastAPI):
             
         except Exception as e:
             print(f"=== [Ошибка Телеметрии при старте] {e} ===")
-
+            
+    # --- Автоматическая инициализация коллекции Qdrant ---
     await init_qdrant_collection()
-
+    
+    # --- Автоматическая инициализация MinIO ---
+    await init_prompt_storage()
+    
     yield  # В этой точке приложение работает и принимает запросы
     # Логирование остановки приложения (код сработает после выключения сервера)
     if monitoring_cfg:
