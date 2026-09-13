@@ -1,114 +1,100 @@
+# -*- coding: utf-8 -*-
 import os
-import aiofiles # Для асинхронного чтения локального кэша, если minio недоступен
-from aiobotocore.session import get_session
-from botocore.exceptions import ClientError
-from metrics.telemetry import log_event
+import aiobotocore.session
+import redis.asyncio as aioredis
 
+# Глобальные константы MinIO S3
 BUCKET_NAME = "agent-prompts"
+s3_client = None
 
-def get_minio_credentials() -> tuple[str, str, str]:
-    """Динамически извлекает параметры MinIO из config.ini с учетом окружения разработки"""
-    from main import app_config
-    
-    minio_cfg = app_config.get("minio", {})
-    host = minio_cfg.get("host", "http://localhost")
-    port = minio_cfg.get("port", "9000")
-    user = minio_cfg.get("user", "marmai_admin")
-    
-    # Сначала пытаемся взять 'pass' из секции [minio], 
-    # если нет — берем напрямую из os.environ, если и там нет — ставим дефолт
-    password = minio_cfg.get("pass") or os.environ.get("MINIO_ROOT_PASSWORD", "nJgDOIrMxTXdtlHAePSAZ2")
-    
-    # Умная подмена хоста для локальной Windows машины
-    if "minio_core" in host and not os.path.exists("/.dockerenv"):
-        host = "http://localhost"
-        
-    endpoint_url = f"{host}:{port}"
-    return endpoint_url, user, password
+# Инициализируем асинхронное подключение к Dragonfly
+redis_client = aioredis.from_url("redis://localhost:6379", decode_responses=True)
 
 
 async def init_prompt_storage():
-    """Асинхронная инициализация бакета и синхронизация системных промптов при старте"""
-    endpoint_url, user, password = get_minio_credentials()
+    """Инициализирует подключение к MinIO S3 и проверяет наличие бакета."""
+    global s3_client
+    from main import app_config
     
-    print(f"=== [MinIO] Попытка асинхронного подключения к: {endpoint_url} ===")
+    s3_cfg = app_config.get("s3", {})
+    endpoint = f"http://{s3_cfg.get('host', 'localhost')}:{s3_cfg.get('port', '9000')}"
     
-    session = get_session()
-    async with session.create_client(
+    print(f"=== [MinIO] Попытка асинхронного подключения к: {endpoint} ===")
+    
+    # ИСПРАВЛЕНО: Гибкое извлечение ключей авторизации из config.ini с фоллбэком на .env
+    access_key = (
+        s3_cfg.get("access_key") or 
+        s3_cfg.get("access_key_id") or 
+        os.getenv("MINIO_ROOT_USER") or 
+        os.getenv("AWS_ACCESS_KEY_ID") or 
+        "minioadmin"
+    )
+    
+    secret_key = (
+        s3_cfg.get("secret_key") or 
+        s3_cfg.get("secret_key_access") or 
+        os.getenv("MINIO_ROOT_PASSWORD") or 
+        os.getenv("AWS_SECRET_ACCESS_KEY") or 
+        "minioadmin"
+    )
+    
+    # Очищаем строки от случайных пробелов
+    access_key = access_key.strip()
+    secret_key = secret_key.strip()
+    
+    session = aiobotocore.session.get_session()
+    s3_client = session.create_client(
         "s3",
-        endpoint_url=endpoint_url,
-        aws_access_key_id=user,
-        aws_secret_access_key=password,
-        region_name="ru-east-1"
-    ) as s3:
+        region_name="us-east-1",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key
+    )
+    
+    # Проверяем или создаем бакет
+    async with s3_client as s3:
         try:
-            # Асинхронно проверяем наличие бакета
             await s3.head_bucket(Bucket=BUCKET_NAME)
             print(f"=== [MinIO] Бакет '{BUCKET_NAME}' обнаружен ===")
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == '404':
-                print(f"=== [MinIO] Бакет '{BUCKET_NAME}' не найден. Создаю новый... ===")
-                await s3.create_bucket(Bucket=BUCKET_NAME)
-                print(f"=== [MinIO] Бакет '{BUCKET_NAME}' успешно создан! ===")
-            else:
-                log_event(
-                    body=f"MinIO bucket check failed: {str(e)}",
-                    event_name="minio_init_error",
-                    attributes={"status": "error"}
-                )
-                raise e
-
-        # Локальные файлы для синхронизации
-        local_files = {
-            "instructions/system_prompt.md": "system_prompt.md",
-            "instructions/architecture.md": "architecture.md",
-            "instructions/agent_pipeline.md": "agent_pipeline.md"
-        }
-
-        for local_path, s3_key in local_files.items():
-            if os.path.exists(local_path):
-                try:
-                    # Читаем локальный файл асинхронно перед отправкой
-                    with open(local_path, "rb") as f:
-                        file_data = f.read()
-                        
-                    await s3.put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=file_data)
-                    print(f"✅ [MinIO] Файл {local_path} синхронизирован как {s3_key}")
-                except Exception as upload_err:
-                    print(f"❌ [MinIO] Ошибка загрузки файла {local_path}: {upload_err}")
-            else:
-                print(f"⚠️ [MinIO] Локальный файл {local_path} отсутствует на диске!")
+        except Exception:
+            print(f"🚀 [MinIO] Бакет '{BUCKET_NAME}' не найден. Создаю новый...")
+            await s3.create_bucket(Bucket=BUCKET_NAME)
 
 
-async def load_prompt_from_minio(s3_key: str) -> str:
-    """Асингулярно скачивает текст промпта из MinIO с фоллбэком на локальный кэш"""
-    endpoint_url, user, password = get_minio_credentials()
+async def load_prompt_from_minio(filename: str) -> str:
+    """
+    Загружает текст промпта из папки на диске с автоматическим 
+    высокоскоростным кэшированием напрямую в оперативную память Dragonfly.
+    """
+    cache_key = f"prompt:{filename}"
     
-    session = get_session()
     try:
-        async with session.create_client(
-            "s3",
-            endpoint_url=endpoint_url,
-            aws_access_key_id=user,
-            aws_secret_access_key=password,
-            region_name="ru-east-1"
-        ) as s3:
-            response = await s3.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-            async with response['Body'] as stream:
-                data = await stream.read()
-                return data.decode('utf-8')
-                
+        # 1. Мгновенное извлечение из памяти Dragonfly
+        cached_prompt = await redis_client.get(cache_key)
+        if cached_prompt:
+            return cached_prompt
+    except Exception as cache_err:
+        print(f"⚠️ [Dragonfly] Ошибка чтения кэша: {cache_err}")
+
+    # 2. Фоллбэк на чтение реального файла с диска
+    local_path = os.path.join("instructions", filename)
+    if not os.path.exists(local_path):
+        local_path = filename
+
+    print(f"📥 [Storage] Чтение свежей копии файла с диска: '{local_path}'...")
+    try:
+        with open(local_path, "r", encoding="utf-8") as f:
+            prompt_text = f.read()
     except Exception as e:
-        log_event(
-            body=f"Failed to read prompt '{s3_key}' from MinIO, switching to fallback: {str(e)}",
-            event_name="minio_read_warning",
-            attributes={"status": "warning", "file": s3_key}
-        )
+        print(f"❌ Ошибка чтения файла промпта {filename}: {e}")
+        prompt_text = "Ты — полезный ИИ-ассистент MarmAI. В твоем распоряжении есть инструменты."
+
+    # 3. Кэшируем большой текст инструкций обратно в ОЗУ (TTL 5 минут)
+    try:
+        if len(prompt_text) > 50:
+            await redis_client.set(cache_key, prompt_text, ex=300)
+            print(f"✅ [Dragonfly] Промпт '{filename}' (длина: {len(prompt_text)}) успешно кэширован!")
+    except Exception as cache_err:
+        print(f"⚠️ [Dragonfly] Не удалось записать ключ в ОЗУ: {cache_err}")
         
-        # Надежный асинхронный фоллбэк на локальный файл
-        local_fallback = f"instructions/{s3_key}"
-        if os.path.exists(local_fallback):
-            with open(local_fallback, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
+    return prompt_text

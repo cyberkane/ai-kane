@@ -1,8 +1,10 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 import time
 import json
 import httpx
+import inspect
 import asyncio
 from fastapi import APIRouter, Request, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -12,8 +14,10 @@ from metrics.telemetry import log_event
 from database.vector_storage import search_similar_knowledge
 from database.storage import load_prompt_from_minio
 from database.influx_storage import track_agent_telemetry
+from tools.registry import TOOLS_SCHEMAS, TOOLS_REGISTRY
 
 router = APIRouter()
+
 
 def get_ollama_url(app_config: dict) -> str:
     chat_cfg = app_config.get("chat", {})
@@ -23,13 +27,13 @@ def get_ollama_url(app_config: dict) -> str:
         host = "http://localhost"
     return f"{host}:{port}"
 
+
 @router.post("/chat/completions")
 async def proxy_chat(request: Request):
     from main import app_config
 
     print("\n🚀🚀🚀 [FASTAPI ШЛЮЗ] ВЫЗВАН RAG ПАЙПЛАЙН ЧАТА! 🚀🚀🚀")
 
-    # ИСПРАВЛЕНО: Безопасный асинхронный парсинг входящего JSON с защитой от 500 ошибок
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -56,7 +60,7 @@ async def proxy_chat(request: Request):
     print(f"🔎 [RAG ТЕСТ] Запрос пользователя: '{user_query}'")
     start_time = time.perf_counter()
 
-    # 1. Скачиваем базовый промпт из MinIO
+    # 1. Скачиваем базовый промпт из MinIO S3 / Локального диска
     system_base = await load_prompt_from_minio("system_prompt.md")
     print(f"📦 [RAG ТЕСТ] Длина системного промпта из MinIO: {len(system_base)} символов")
     
@@ -65,7 +69,6 @@ async def proxy_chat(request: Request):
     if user_query:
         rag_context = await search_similar_knowledge(query_text=user_query, limit=2)
     
-    # ВЫВОДИМ В КОНСОЛЬ РЕЗУЛЬТАТ ПОИСКА В QDRANT
     print(f"🔍 [RAG ТЕСТ] Найденный контекст в Qdrant:\n{rag_context if rag_context else '⚠️ НИЧЕГО НЕ НАЙДЕНО!'}\n")
 
     # 3. Собираем обогащенный промпт
@@ -77,7 +80,7 @@ async def proxy_chat(request: Request):
             f"========================================\n"
         )
 
-    # 4. Модифицируем входящий body запроса: подменяем system prompt на наш RAG-промпт
+    # 4. Модифицируем входящий body запроса
     system_msg_found = False
     for msg in messages:
         if msg.get("role") == "system":
@@ -89,6 +92,20 @@ async def proxy_chat(request: Request):
         messages.insert(0, {"role": "system", "content": enriched_system_content})
         
     body["messages"] = messages
+    
+    # 5. Динамическое форсирование вызова функций (Tool Choice) под API Ollama
+    user_query_lower = user_query.lower()
+    if TOOLS_SCHEMAS:
+        body["tools"] = TOOLS_SCHEMAS
+        
+        if "время" in user_query_lower or "time" in user_query_lower or "часы" in user_query_lower:
+            body["tool_choice"] = "get_system_time"
+            print("🎯 [MarmAI ШЛЮЗ] Обнаружен ключевой запрос времени. Форсирую string tool_choice: get_system_time")
+            
+        elif "статус" in user_query_lower or "инфраструктур" in user_query_lower or "контейнер" in user_query_lower:
+            body["tool_choice"] = "check_infrastructure_status"
+            print("🎯 [MarmAI ШЛЮЗ] Обнаружен запрос систем. Форсирую string tool_choice: check_infrastructure_status")
+
     ollama_url = f"{get_ollama_url(app_config)}/v1/chat/completions"
     
     # Проверка доступности LLM
@@ -99,18 +116,93 @@ async def proxy_chat(request: Request):
             raise HTTPException(status_code=503, detail="Ollama container offline")
 
     def count_tokens_fallback(text: str) -> int:
-        """
-        Fast, lightweight regex-based token estimator fallback.
-        Splits text by words, spaces, and punctuation to match standard token bounds.
-        """
         if not text:
             return 0
         return len(re.findall(r'\w+|[^\w\s]', text))
-    
+
+    # --- ПЕРЕХВАТ ВЫЗОВА ИНСТРУМЕНТОВ (Pre-flight Tool Check) ---
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            check_body = dict(body)
+            check_body["stream"] = False
+            
+            response = await client.post(ollama_url, json=check_body)
+            if response.status_code == 200:
+                res_json = response.json()
+                choices = res_json.get("choices", [])
+                
+                print(f"📦 [Ollama Debug Response]: {json.dumps(res_json, ensure_ascii=False)[:200]}...")
+                
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    first_choice = choices[0]
+                    message_payload = first_choice.get("message", {})
+                    tool_calls = message_payload.get("tool_calls", [])
+                    
+                    if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+                        first_tool_call = tool_calls[0]
+                        func_call = first_tool_call.get("function", {})
+                        func_name = func_call.get("name")
+                        args = func_call.get("arguments", {})
+                        
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                args = {}
+                            
+                        print(f"🎯 [MarmAI ШЛЮЗ] СРАБОТАЛ ПЕРЕХВАТ! Вызов инструмента: '{func_name}'")
+                        
+                        if func_name in TOOLS_REGISTRY:
+                            func = TOOLS_REGISTRY[func_name]
+                            if inspect.iscoroutinefunction(func):
+                                result_data = await func(**args)
+                            else:
+                                result_data = func(**args)
+                        else:
+                            result_data = f"Ошибка: Инструмент '{func_name}' отсутствует в TOOLS_REGISTRY."
+                            
+                        generation_time_ms = int((time.perf_counter() - start_time) * 1000)
+                        
+                        # Отправляем телеметрию вызова инструмента в InfluxDB 3.0
+                        asyncio.create_task(
+                            track_agent_telemetry(
+                                session_id=body.get("session_id", "web_session"),
+                                graph_name="marm_ai_v1",
+                                node_name="proxy_chat_router",
+                                model_name=model_name,
+                                status="success",
+                                prompt_tokens=count_tokens_fallback(user_query),
+                                completion_tokens=count_tokens_fallback(str(result_data)),
+                                latency_ms=generation_time_ms,
+                                tool_called=func_name
+                            )
+                        )
+                        
+                        # Безопасная кодировка структуры через json.dumps
+                        clean_content = f"🤖 [MarmAI Вызов] {result_data}"
+                        chunk_dict = {
+                            "choices": [{
+                                "delta": {"content": clean_content},
+                                "finish_reason": "stop",
+                                "index": 0
+                            }],
+                            "model": model_name
+                        }
+                        safe_json_str = json.dumps(chunk_dict, ensure_ascii=False)
+                        fake_stream_chunk = f"data: {safe_json_str}\n\ndata: [DONE]\n\n"
+                        
+                        return StreamingResponse(
+                            iter([fake_stream_chunk.encode('utf-8')]),
+                            media_type="text/event-stream"
+                        )
+                    else:
+                        print("⚠️ [MarmAI ШЛЮЗ] Модель предпочла ответить текстом (массив tool_calls пуст).")
+    except Exception as e:
+        print(f"❌ [MarmAI ШЛЮЗ] Критическая ошибка проверки Tool Call: {e}. Откат на стандартный стрим.")
+
+    # --- СТАНДАРТНЫЙ СТРИМИНГ ОТВЕТА (Если модель выдала обычный текст) ---
     async def stream_generator():
-        # Buffer to collect the full model response text for post-stream token counting
         full_completion_text = ""
-        
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 async with client.stream("POST", ollama_url, json=body) as response:
@@ -120,26 +212,20 @@ async def proxy_chat(request: Request):
                     
                     async for chunk in response.aiter_bytes():
                         if chunk:
-                            # 1. Decode chunk to intercept content text for completion tracking
                             try:
                                 chunk_str = chunk.decode('utf-8', errors='ignore')
-                                # Ollama/OpenAI streams send chunks prefixed with 'data: '
                                 if chunk_str.startswith("data:"):
                                     for line in chunk_str.split("\n"):
                                         if line.startswith("data: ") and "[DONE]" not in line:
                                             clean_json = line[6:].strip()
                                             if clean_json:
                                                 data_payload = json.loads(clean_json)
-                                                # Capture token fragment from choices delta content
-                                                delta_content = data_payload.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                                delta_content = data_payload.get("choices", [{}]).get("delta", {}).get("content", "")
                                                 full_completion_text += delta_content
                             except Exception:
-                                pass # Prevent token counting parsing errors from dropping client streaming chunks
-                            
-                            # 2. Immediately yield raw bytes back to the waiting client client
+                                pass
                             yield chunk
             
-            # --- POST-STREAM PERFORMANCE METRICS TRACKING ---
             generation_time_ms = int((time.perf_counter() - start_time) * 1000)
             
             log_event(
@@ -148,14 +234,10 @@ async def proxy_chat(request: Request):
                 attributes={"status": "success", "context_injected": bool(rag_context)}
             )
 
-            # Compile prompt context payload string to count incoming text mass
             full_prompt_text = "".join([m.get("content", "") for m in body.get("messages", [])])
-            
-            # Compute exact token volumes via industrial fallback counter
             prompt_tokens = count_tokens_fallback(full_prompt_text)
             completion_tokens = count_tokens_fallback(full_completion_text)
 
-            # 3. Fire-and-Forget non-blocking asynchronous payload drop directly to InfluxDB 3.0
             asyncio.create_task(
                 track_agent_telemetry(
                     session_id=body.get("session_id", "web_session"),
@@ -171,7 +253,6 @@ async def proxy_chat(request: Request):
             )
 
         except Exception as e:
-            # Track failure payload to your time-series tables on stream crash
             generation_time_ms = int((time.perf_counter() - start_time) * 1000)
             asyncio.create_task(
                 track_agent_telemetry(
@@ -186,8 +267,22 @@ async def proxy_chat(request: Request):
                     tool_called="none"
                 )
             )
-            yield f"data: {{\"error\": \"Stream interrupted: {str(e)}\"}}\n\n".encode('utf-8')
+            
+            # ИСПРАВЛЕНО: Безопасное экранирование ошибок генератора и исправление имени переменной
+            error_msg = f"Stream interrupted: {str(e)}"
+            error_dict = {
+                "choices": [{
+                    "delta": {"content": f"❌ [MarmAI Error] {error_msg}"},
+                    "finish_reason": "stop",
+                    "index": 0
+                }],
+                "model": model_name
+            }
+            safe_error_str = json.dumps(error_dict, ensure_ascii=False)
+            yield f"data: {safe_error_str}\n\n".encode('utf-8')
+            yield b"data: [DONE]\n\n"
 
+    # ИСПРАВЛЕНО: Этот return теперь находится на уровне основной функции proxy_chat, а не внутри генератора!
     return StreamingResponse(
         stream_generator(), 
         media_type="text/event-stream",

@@ -1,77 +1,94 @@
-import uuid
-from fastapi import APIRouter, Request, HTTPException, status
-from langchain_core.messages import HumanMessage
-from database.agent_graph import agent_app
-from metrics.telemetry import log_event
+# -*- coding: utf-8 -*-
+import json
+import inspect
+import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+# Импортируем твои реальные структуры из реестра
+from tools.registry import TOOLS_REGISTRY, TOOLS_SCHEMAS
 
 router = APIRouter()
 
-@router.post("/agent/chat")
-async def run_agent_graph(request: Request):
+class AgentRequest(BaseModel):
+    messages: list
+    model: str = "llama3.1:8b"
+
+@router.post("/v1/agent/run")
+async def run_agent(body: AgentRequest):
     """
-    Эндпоинт для запуска LangGraph агента с инструментами.
-    Ожидает JSON вида: 
-    {
-        "message": "Какое сейчас время на сервере?",
-        "thread_id": "опциональный_строковый_id_сессии"
+    Эндпоинт оркестрации агента. Подтягивает схемы TOOLS_SCHEMAS,
+    передает их в LLM и автоматически выполняет привязанный Python-код из TOOLS_REGISTRY.
+    """
+    
+    # Формируем payload для Ollama, используя твои схемы
+    ollama_payload = {
+        "model": body.model,
+        "messages": body.messages,
+        "stream": False
     }
-    """
+    
+    # Передаем инструменты, если они описаны в реестре
+    if TOOLS_SCHEMAS:
+        ollama_payload["tools"] = TOOLS_SCHEMAS
+    
     try:
-        body = await request.json()
-        user_message = body.get("message")
-        
-        if not user_message:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing 'message' field in request body."
-            )
+        async with httpx.AsyncClient() as client:
+            response = await client.post("http://localhost:11434/api/chat", json=ollama_payload, timeout=30.0)
             
-        # Извлекаем thread_id из запроса или генерируем новый для изоляции сессий памяти
-        thread_id = body.get("thread_id", str(uuid.uuid4()))
-        config = {"configurable": {"thread_id": thread_id}}
-        
-        log_event(
-            body=f"Invoking LangGraph agent workflow for thread: {thread_id}",
-            event_name="agent_graph_start",
-            attributes={"thread_id": thread_id, "status": "info"}
-        )
-        
-        # Подготавливаем стартовое состояние для графа
-        inputs = {"messages": [HumanMessage(content=user_message)]}
-        
-        # Асинхронно запускаем выполнение графа LangGraph до тех пор, пока он не дойдет до END
-        final_state = await agent_app.ainvoke(inputs, config=config)
-        
-        # Извлекаем самое последнее сообщение из истории графа (это должен быть финальный ответ AI)
-        messages_history = final_state.get("messages", [])
-        if not messages_history:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Agent graph execution returned empty state."
-            )
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail=f"Ollama error: {response.text}")
+                
+            res_json = response.json()
+            message = res_json.get("message", {})
+            tool_calls = message.get("tool_calls", [])
             
-        last_ai_message = messages_history[-1]
-        
-        log_event(
-            body=f"LangGraph workflow successfully finished for thread: {thread_id}",
-            event_name="agent_graph_success",
-            attributes={"thread_id": thread_id, "status": "success", "steps_count": len(messages_history)}
-        )
-        
-        # Возвращаем структурированный ответ
-        return {
-            "status": "success",
-            "thread_id": thread_id,
-            "response": last_ai_message.content
-        }
-        
+            # ВЫПОЛНЕНИЕ ИНСТРУМЕНТОВ (Tool Execution):
+            if tool_calls:
+                for call in tool_calls:
+                    func_name = call.get("function", {}).get("name")
+                    arguments = call.get("function", {}).get("arguments", {})
+                    
+                    # Декодируем аргументы, если они прилетели строкой
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except Exception:
+                            arguments = {}
+                    
+                    print(f"🎯 [ИИ-АГЕНТ] Вызов инструмента: {func_name} с аргументами {arguments}")
+                    
+                    # Проверяем наличие функции в твоем маппинге TOOLS_REGISTRY
+                    if func_name in TOOLS_REGISTRY:
+                        func = TOOLS_REGISTRY[func_name]
+                        
+                        try:
+                            # Проверяем, асинхронная ли функция (async def) или обычная (def)
+                            if inspect.iscoroutinefunction(func):
+                                result_data = await func(**arguments)
+                            else:
+                                result_data = func(**arguments)
+                                
+                            return {
+                                "role": "assistant",
+                                "content": f"🤖 [MarmAI Вызов] {result_data}"
+                            }
+                        except Exception as tool_err:
+                            return {
+                                "role": "assistant",
+                                "content": f"❌ Ошибка внутри инструмента '{func_name}': {str(tool_err)}"
+                            }
+                    else:
+                        return {
+                            "role": "assistant",
+                            "content": f"❌ Ошибка: Инструмент '{func_name}' вызван моделью, но отсутствует в TOOLS_REGISTRY"
+                        }
+            
+            # Если модель просто сгенерировала текст
+            return {
+                "role": "assistant",
+                "content": message.get("content", "")
+            }
+            
     except Exception as e:
-        log_event(
-            body=f"Critical failure in agent graph endpoint: {str(e)}",
-            event_name="agent_graph_error",
-            attributes={"status": "error"}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An error occurred while running the agent graph: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Agent workflow crashed: {str(e)}")
