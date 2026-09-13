@@ -1,6 +1,6 @@
 import os
-import httpx
 import asyncio
+import httpx
 from fastapi import APIRouter
 from metrics.telemetry import log_event
 
@@ -9,7 +9,6 @@ router = APIRouter()
 async def check_service(client: httpx.AsyncClient, name: str, url: str, expected_status: int = 200) -> dict:
     """Асинхронный хелпер для проверки одного сервиса"""
     try:
-        # Делаем быстрый запрос с таймаутом 1.5 секунды
         response = await client.get(url, timeout=1.5)
         if response.status_code == expected_status:
             return {"status": "healthy", "details": f"Connected to {name}"}
@@ -30,34 +29,33 @@ async def health_check():
             host = "http://localhost"
         return f"{host}:{port}"
 
-    # Собираем URL для проверок
-    vault_url = f"{get_local_host('vault', '8200')}/v1/sys/health"
-    qdrant_url = f"{get_local_host('vectors', '6333')}/"
-    # Для Dragonfly/Redis используем HTTP пинг, если у него включен http-порт, 
-    # либо просто проверяем доступность порта
-    dragonfly_url = f"{get_local_host('cache', '6379')}/" 
+    # ИСПРАВЛЕНО: Используем нативные эндпоинты для локального окружения
+    vault_url = f"{get_local_host('vault', '8200')}/v1/sys/seal-status"
+    qdrant_url = get_local_host('vectors', '6333') + "/"
 
     async with httpx.AsyncClient() as client:
-        # Создаем список асинхронных задач
+        # Запускаем проверки параллельно
         tasks = [
             check_service(client, "HashiCorp Vault", vault_url, expected_status=200),
             check_service(client, "Qdrant Vector DB", qdrant_url, expected_status=200),
         ]
-        
-        # Запускаем ВСЕ проверки ОДНОВРЕМЕННО
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
+    # Формируем корректную карту статусов
+    vault_res = results[0] if isinstance(results[0], dict) else {"status": "unhealthy", "details": str(results[0])}
+    qdrant_res = results[1] if isinstance(results[1], dict) else {"status": "unhealthy", "details": str(results[1])}
+    
     health_status = {
-        "vault": results[0],
-        "qdrant": results[1]
+        "vault": vault_res,
+        "qdrant": qdrant_res
     }
     
     # Определяем общий статус системы
-    is_all_healthy = all(res.get("status") == "healthy" for res in results if isinstance(res, dict))
+    is_all_healthy = vault_res.get("status") == "healthy" and qdrant_res.get("status") == "healthy"
     global_status = "ok" if is_all_healthy else "degraded"
 
     log_event(
-        body=f"Healthcheck executed. Status: {global_status}",
+        body=f"Global infrastructure healthcheck executed. Status: {global_status}",
         event_name="healthcheck_run",
         attributes={"global_status": global_status}
     )
