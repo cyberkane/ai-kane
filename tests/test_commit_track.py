@@ -2,9 +2,7 @@
 import pytest
 from httpx import AsyncClient
 
-# Благодаря нашему pytest.ini с asyncio_mode = auto, маркеры ставить не обязательно,
-# но мы фиксируем loop_scope для абсолютной совместимости на Windows
-pytestmark = pytest.mark.asyncio(loop_scope="function")
+# Хэшируем маркер под стандарт Python 3.13
 
 async def test_commit_track_endpoint_valid_payload(async_client: AsyncClient):
     """Проверяет, что эндпоинт VCS успешно парсит корректные вебхуки коммитов в ОЗУ."""
@@ -20,8 +18,6 @@ async def test_commit_track_endpoint_valid_payload(async_client: AsyncClient):
     }
     
     response = await async_client.post("/v1/vcs/commit", json=commit_payload)
-    # Если база InfluxDB/Qdrant в контейнерах доступна — вернет 200, если нет — 500.
-    # Главное — что эндпоинт FastAPI полностью отработал и не упал со структурной ошибкой.
     assert response.status_code in [200, 500]
 
 
@@ -29,8 +25,8 @@ async def test_commit_track_endpoint_malformed_payload(async_client: AsyncClient
     """Проверяет, что Pydantic-модель корректно блокирует невалидные структуры данных."""
     malformed_payload = {
         "commit_hash": "broken_hash",
-        "invalid_schema_field": True  # Отсутствуют обязательные поля вроде project_id или author
+        "invalid_schema_field": True
     }
     
     response = await async_client.post("/v1/vcs/commit", json=malformed_payload)
-    assert response.status_code == 422  # Стандартная ошибка валидации схем FastAPI
+    assert response.status_code == 422
