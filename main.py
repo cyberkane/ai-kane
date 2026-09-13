@@ -22,6 +22,7 @@ from database.storage import init_prompt_storage
 from functions.agent import router as agent_router
 from tools.infra_status import check_infrastructure_status
 from tools.test_runner import run_project_tests
+from functions.commit_track import router as commit_track_router
 
 load_dotenv()
 app_config = {}
@@ -101,6 +102,7 @@ app.include_router(chat_router, prefix="/v1")
 app.include_router(autocomplete_router, prefix="/v1")
 app.include_router(embedder_router, prefix="/v1")
 app.include_router(agent_router, prefix="/v1")
+app.include_router(commit_track_router, prefix="/v1")
 app.include_router(health_router)
 
 @app.get("/test-tools")
