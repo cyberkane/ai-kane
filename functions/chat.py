@@ -1,0 +1,122 @@
+import os
+import time
+import json
+import httpx
+from fastapi import APIRouter, Request, HTTPException, status
+from fastapi.responses import StreamingResponse
+from metrics.telemetry import log_event
+
+# Импортируем наши асинхронные методы баз данных и хранилища
+from database.vector_storage import search_similar_knowledge
+from database.storage import load_prompt_from_minio
+
+router = APIRouter()
+
+def get_ollama_url(app_config: dict) -> str:
+    chat_cfg = app_config.get("chat", {})
+    host = chat_cfg.get("host", "http://localhost")
+    port = chat_cfg.get("port", "11434")
+    if "ollama_core" in host and not os.path.exists("/.dockerenv"):
+        host = "http://localhost"
+    return f"{host}:{port}"
+
+@router.post("/chat/completions")
+async def proxy_chat(request: Request):
+    from main import app_config
+
+    print("\n🚀🚀🚀 [FASTAPI ШЛЮЗ] ВЫЗВАН RAG ПАЙПЛАЙН ЧАТА! 🚀🚀🚀")
+
+    # ИСПРАВЛЕНО: Безопасный асинхронный парсинг входящего JSON с защитой от 500 ошибок
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        log_event(
+            body="Failed to parse incoming request JSON body",
+            event_name="invalid_json_payload",
+            attributes={"status": "error"}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload provided."
+        )
+
+    model_name = body.get('model', 'unknown')
+    messages = body.get('messages', [])
+    
+    # Извлекаем запрос пользователя
+    user_query = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            user_query = msg.get("content", "")
+            break
+
+    print(f"🔎 [RAG ТЕСТ] Запрос пользователя: '{user_query}'")
+    start_time = time.perf_counter()
+
+    # 1. Скачиваем базовый промпт из MinIO
+    system_base = await load_prompt_from_minio("system_prompt.md")
+    print(f"📦 [RAG ТЕСТ] Длина системного промпта из MinIO: {len(system_base)} символов")
+    
+    # 2. Ищем контекст в Qdrant
+    rag_context = ""
+    if user_query:
+        rag_context = await search_similar_knowledge(query_text=user_query, limit=2)
+    
+    # ВЫВОДИМ В КОНСОЛЬ РЕЗУЛЬТАТ ПОИСКА В QDRANT
+    print(f"🔍 [RAG ТЕСТ] Найденный контекст в Qdrant:\n{rag_context if rag_context else '⚠️ НИЧЕГО НЕ НАЙДЕНО!'}\n")
+
+    # 3. Собираем обогащенный промпт
+    enriched_system_content = f"{system_base}\n\n"
+    if rag_context:
+        enriched_system_content += (
+            f"=== ВАЖНАЯ ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ ===\n"
+            f"Используй эти данные для ответа пользователю:\n{rag_context}\n"
+            f"========================================\n"
+        )
+
+    # 4. Модифицируем входящий body запроса: подменяем system prompt на наш RAG-промпт
+    system_msg_found = False
+    for msg in messages:
+        if msg.get("role") == "system":
+            msg["content"] = enriched_system_content
+            system_msg_found = True
+            break
+            
+    if not system_msg_found:
+        messages.insert(0, {"role": "system", "content": enriched_system_content})
+        
+    body["messages"] = messages
+    ollama_url = f"{get_ollama_url(app_config)}/v1/chat/completions"
+    
+    # Проверка доступности LLM
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.get(get_ollama_url(app_config), timeout=2.0)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            raise HTTPException(status_code=503, detail="Ollama container offline")
+
+    async def stream_generator():
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream("POST", ollama_url, json=body) as response:
+                    if response.status_code != 200:
+                        yield f"data: {{\"error\": \"Ollama error {response.status_code}\"}}\n\n".encode('utf-8')
+                        return
+                    async for chunk in response.aiter_bytes():
+                        if chunk:
+                            yield chunk
+            
+            generation_time = round(time.perf_counter() - start_time, 3)
+            log_event(
+                body=f"RAG Chat success in {generation_time}s",
+                event_name="rag_chat_success",
+                attributes={"status": "success", "context_injected": bool(rag_context)}
+            )
+        except Exception:
+            yield f"data: {{\"error\": \"Stream interrupted\"}}\n\n".encode('utf-8')
+
+    return StreamingResponse(
+        stream_generator(), 
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+    )
