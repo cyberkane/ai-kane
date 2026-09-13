@@ -19,3 +19,4 @@ qdrant_client
 asyncio
 pytest
 python-dotenv
+pytest-asyncio

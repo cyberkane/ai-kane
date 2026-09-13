@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import httpx
 from fastapi import APIRouter, Request, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -25,7 +26,20 @@ async def proxy_chat(request: Request):
 
     print("\n🚀🚀🚀 [FASTAPI ШЛЮЗ] ВЫЗВАН RAG ПАЙПЛАЙН ЧАТА! 🚀🚀🚀")
 
-    body = await request.json()
+    # ИСПРАВЛЕНО: Безопасный асинхронный парсинг входящего JSON с защитой от 500 ошибок
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        log_event(
+            body="Failed to parse incoming request JSON body",
+            event_name="invalid_json_payload",
+            attributes={"status": "error"}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload provided."
+        )
+
     model_name = body.get('model', 'unknown')
     messages = body.get('messages', [])
     

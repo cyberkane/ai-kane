@@ -1,12 +1,14 @@
 from tools.system_time import get_system_time
 from tools.test_runner import run_project_tests
 from tools.infra_status import check_infrastructure_status
+from tools.autotests import generate_autotest_for_file
 
 # Маппинг имен для вызова графом (включает как синхронные, так и асинхронные функции)
 TOOLS_REGISTRY = {
     "get_system_time": get_system_time,
     "run_project_tests": run_project_tests,
-    "check_infrastructure_status": check_infrastructure_status
+    "check_infrastructure_status": check_infrastructure_status,
+    "generate_autotest_for_file": generate_autotest_for_file,
 }
 
 # Строгие JSON-схемы для Ollama / LangGraph
@@ -41,6 +43,23 @@ TOOLS_SCHEMAS = [
             "name": "check_infrastructure_status",
             "description": "Сканирует порты и проверяет статус здоровья контейнеров Vault, MinIO, InfluxDB, Qdrant и Dragonfly.",
             "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_autotest_for_file",
+            "description": "Автономно генерирует новые pytest-тесты для указанного Python-файла на основе его содержимого.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string", 
+                        "description": "Относительный путь к файлу кода, для которого нужно написать тесты (например, 'functions/chat.py')."
+                    }
+                },
+            "required": ["file_path"]
+            }
         }
     }
 ]
