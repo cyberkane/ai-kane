@@ -23,6 +23,7 @@ from functions.agent import router as agent_router
 from tools.infra_status import check_infrastructure_status
 from tools.test_runner import run_project_tests
 from functions.commit_track import router as commit_track_router
+from database.vault_storage import fetch_database_secrets
 
 load_dotenv()
 app_config = {}
@@ -56,6 +57,19 @@ async def lifespan(app: FastAPI):
             port = app_config[section].get('port')
             if host and port:
                 app_config[section]['api_base'] = f"{host}:{port}"
+
+    # --- АСИНХРОННАЯ ИНТЕГРАЦИЯ VAULT ---
+    print("🔐 === [Vault] Подключаемся к сейфу секретов... ===")
+    db_secrets = await fetch_database_secrets()
+
+    if db_secrets:
+        if "database" in app_config:
+            app_config["database"]["user"] = db_secrets.get("user", app_config["database"].get("user"))
+            app_config["database"]["pass"] = db_secrets.get("pass", app_config["database"].get("pass"))
+            app_config["database"]["token"] = db_secrets.get("token", app_config["database"].get("token"))
+            print("🔐 === [Vault] Секреты InfluxDB успешно инжектированы в память приложения! ===")
+    else:
+        print("⚠️ === [Vault] Используются базовые значения конфигурации.")
 
     # Извлекаем секцию мониторинга напрямую
     monitoring_cfg = app_config.get('monitoring')
