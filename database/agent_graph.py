@@ -1,16 +1,18 @@
 import os
+import re
+import json
+import time
 import httpx
 from typing import Annotated, Sequence
 from typing_extensions import TypedDict
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-# Используем стабильный in-memory чекпоинтер для сохранения состояний графа
 from langgraph.checkpoint.memory import MemorySaver 
-from metrics.telemetry import logger
+from metrics.telemetry import log_event
 
 # --- 1. ОПРЕДЕЛЕНИЕ ИНСТРУМЕНТОВ (TOOLS) ---
 @tool
@@ -24,95 +26,134 @@ def get_system_time() -> str:
     from datetime import datetime
     return f"Текущее время на сервере: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-# Регистрируем инструменты в специальном узле LangGraph
 tools = [get_weather_forecast, get_system_time]
 tool_node = ToolNode(tools)
 
 
 # --- 2. ОПРЕДЕЛЕНИЕ СОСТОЯНИЯ (STATE) ---
 class AgentState(TypedDict):
-    # Поле messages накапливает историю реплик и шагов рассуждения
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
-# --- 3. АСИНХРОННЫЙ УЗЕЛ МОДЕЛИ (NODES) ---
+# --- 3. ХЕЛПЕР ДЛЯ ДИНАМИЧЕСКИХ URL ИЗ CONFIG.INI ---
+def get_ollama_chat_config() -> tuple[str, str]:
+    """Извлекает актуальные адреса и модель для агента из общего конфига"""
+    from main import app_config
+    chat_cfg = app_config.get("chat", {})
+    host = chat_cfg.get("host", "http://localhost")
+    port = chat_cfg.get("port", "11434")
+    model = chat_cfg.get("model", "llama3.1:8b")
+    
+    if "ollama_core" in host and not os.path.exists("/.dockerenv"):
+        host = "http://localhost"
+        
+    return f"{host}:{port}/api/chat", model
+
+
+# --- 4. АСИНХРОННЫЙ УЗЕЛ МОДЕЛИ (NODES) ---
 async def call_model(state: AgentState):
-    """Асинхронный узел, который гарантированно внедряет актуальный промпт из MinIO."""
-    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ai_ollama_core:11434")
-    MODEL_NAME = os.getenv("CHAT_MODEL", "llama3.1:8b")
+    """Асинхронный узел вызова локальной LLM с поддержкой формата инструментов"""
+    chat_url, model_name = get_ollama_chat_config()
     
-    # 1. Инициализируем массив сообщений для Ollama
-    ollama_messages = []
+    # 1. Извлекаем базовый системный промпт из MinIO (через сохраненный стейт в main)
+    from main import app_config
+    from database.storage import load_prompt_from_minio
     
-    from main import agent_system_prompt
-    if agent_system_prompt:
-        ollama_messages.append({"role": "system", "content": agent_system_prompt})
-    else:
-        # Резервный промпт на случай, если MinIO упадет
-        ollama_messages.append({
-            "role": "system", 
-            "content": "Ты — продвинутый локальный ИИ-помощник по имени MarmAI."
-        })
+    system_base = await load_prompt_from_minio("system_prompt.md")
+    if not system_base:
+        system_base = "Ты — продвинутый локальный ИИ-помощник по имени MarmAI."
+
+    # Формируем жесткую инструкцию для локальной модели, как вызывать инструменты
+    tool_instructions = (
+        f"{system_base}\n\n"
+        "Ты имеешь доступ к инструментам. Если пользователю нужна погода или время, "
+        "ты ОБЯЗАН ответить СТРОГО в формате JSON без лишнего текста:\n"
+        "{\"tool_call\": {\"name\": \"имя_инструмента\", \"arguments\": {\"аргумент\": \"значение\"}}}\n\n"
+        "ВАЖНОЕ ПРАВИЛО: Если в истории диалога тебе УЖЕ пришел результат выполнения инструмента "
+        "(строка вида 'Результат выполнения инструмента: ...'), ты ОБЯЗАН прочитать эти данные "
+        "и развернуто передать их пользователю человеческим языком! Не пиши технические подтверждения."
+        "\nДоступные инструменты:\n"
+        "- get_weather_forecast (аргумент: location)\n"
+        "- get_system_time (без аргументов)\n"
+    )
     
-    # 3. Добавляем всю остальную историю диалога из состояния графа
-    from langchain_core.messages import HumanMessage, AIMessage
+    ollama_messages = [{"role": "system", "content": tool_instructions}]
     
+    # 2. Переносим историю сообщений из графа LangGraph в Ollama формат
     for msg in state.get("messages", []):
-        # Игнорируем SystemMessage, если они случайно попали в историю графа, 
-        # так как мы уже добавили главный промпт выше
-        if msg.__class__.__name__ == "SystemMessage":
+        if msg.type == "system":
             continue
-        elif isinstance(msg, HumanMessage) or msg.__class__.__name__ == "HumanMessage":
+        elif msg.type == "human":
             ollama_messages.append({"role": "user", "content": msg.content})
-        elif isinstance(msg, AIMessage) or msg.__class__.__name__ == "AIMessage":
+        elif msg.type == "ai":
             ollama_messages.append({"role": "assistant", "content": msg.content})
+        elif msg.type == "tool":
+            ollama_messages.append({"role": "user", "content": f"Результат выполнения инструмента: {msg.content}"})
             
     try:
+        log_event(body=f"Agent graph routing via model: {model_name}", event_name="graph_llm_start")
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": MODEL_NAME,
-                    "messages": ollama_messages,
-                    "stream": False
-                },
+                chat_url,
+                json={"model": model_name, "messages": ollama_messages, "stream": False},
                 timeout=30.0
             )
             response.raise_for_status()
             result = response.json()
             
         content = result.get("message", {}).get("content", "")
-        return {"messages": [AIMessage(content=content)]}
+        ai_message = AIMessage(content=content)
+        
+        # УМНЫЙ ПРОМЫШЛЕННЫЙ ПАРСЕР JSON ИЗ ТЕКСТА ОТВЕТА
+        try:
+            # Ищем любые фигурные скобки { ... } в ответе модели, игнорируя текст вокруг
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                parsed = json.loads(json_str)
+                
+                if "tool_call" in parsed:
+                    call_info = parsed["tool_call"]
+                    # Формируем нативный LangChain tool call
+                    ai_message.tool_calls = [{
+                        "name": call_info["name"],
+                        "args": call_info.get("arguments", {}),
+                        "id": f"call_{int(time.time())}"
+                    }]
+        except Exception as parse_err:
+            print(f"⚠️ [LangGraph Парсер] Не удалось извлечь JSON вызова: {parse_err}")
+            
+        return {"messages": [ai_message]}
         
     except Exception as exc:
-        logger.error(f"Ошибка внутри асинхронного узла call_model: {exc}")
-        return {"messages": [AIMessage(content=f"Ошибка генерации: {str(exc)}")]}
+        # ВЫВОДИМ ТОЧНЫЙ ТЕКСТ ОШИБКИ В КОНСОЛЬ И В ОТВЕТ
+        import traceback
+        traceback.print_exc() # Выведет полный стек вызовов в консоль uvicorn
+        
+        log_event(body=f"Error inside graph node: {str(exc)}", event_name="graph_node_error", attributes={"status": "error"})
+        return {"messages": [AIMessage(content=f"Ошибка внутри графа: {str(exc)}")]}
 
 
-# --- 4. ОПРЕДЕЛЕНИЕ УСЛОВНЫХ ПЕРЕХОДОВ (ROUTING) ---
+# --- 5. ОПРЕДЕЛЕНИЕ УСЛОВНЫХ ПЕРЕХОДОВ (ROUTING) ---
 def should_continue(state: AgentState):
     """Анализирует последнее сообщение и решает: вызвать инструмент или завершить работу."""
     last_message = state["messages"][-1]
     
-    # Если модель сгенерировала нативный вызов инструмента (tool_calls), идем в узел инструментов
+    # Если в узле call_model мы успешно распарсили tool_calls, переходим в узел инструментов
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"
     
-    # Если вызовов нет — завершаем выполнение графа и отдаем ответ пользователю
     return END
 
 
-# --- 5. СБОРКА И КОМПИЛЯЦИЯ ГРАФА ---
+# --- 6. СБОРКА И КОМПИЛЯЦИЯ ГРАФА ---
 workflow = StateGraph(AgentState)
 
-# Добавляем узлы в граф состояний
 workflow.add_node("agent", call_model)
 workflow.add_node("tools", tool_node)
 
-# Настраиваем связи (ребра графа)
 workflow.add_edge(START, "agent")
-
-# Задаем условный переход: после узла 'agent' вызывается функция should_continue
 workflow.add_conditional_edges(
     "agent",
     should_continue,
@@ -121,12 +162,7 @@ workflow.add_conditional_edges(
         END: END
     }
 )
-
-# После выполнения любого инструмента граф всегда возвращается к модели для анализа результатов
 workflow.add_edge("tools", "agent")
 
-# Компилируем граф с чекпоинтером памяти процессов
 memory_checkpointer = MemorySaver()
 agent_app = workflow.compile(checkpointer=memory_checkpointer)
-
-logger.info("Граф LangGraph успешно скомпилирован с MemorySaver чепоинтером")

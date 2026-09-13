@@ -17,9 +17,9 @@ from functions.chat import router as chat_router
 from functions.autocomplete import router as autocomplete_router
 from functions.embedder import router as embedder_router
 from functions.health import router as health_router
-from database.vector_storage import init_qdrant_collection
+from database.vector_storage import init_qdrant_collection, save_knowledge_point
 from database.storage import init_prompt_storage
-from database.vector_storage import save_knowledge_point
+from functions.agent import router as agent_router
 
 load_dotenv()
 app_config = {}
@@ -98,6 +98,7 @@ current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 app.include_router(chat_router, prefix="/v1")
 app.include_router(autocomplete_router, prefix="/v1")
 app.include_router(embedder_router, prefix="/v1")
+app.include_router(agent_router, prefix="/v1")
 app.include_router(health_router)
 
 @app.post("/test-add-knowledge")
