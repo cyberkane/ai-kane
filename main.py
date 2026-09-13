@@ -19,6 +19,7 @@ from functions.embedder import router as embedder_router
 from functions.health import router as health_router
 from database.vector_storage import init_qdrant_collection
 from database.storage import init_prompt_storage
+from database.vector_storage import save_knowledge_point
 
 load_dotenv()
 app_config = {}
@@ -98,6 +99,19 @@ app.include_router(chat_router, prefix="/v1")
 app.include_router(autocomplete_router, prefix="/v1")
 app.include_router(embedder_router, prefix="/v1")
 app.include_router(health_router)
+
+@app.post("/test-add-knowledge")
+async def test_add_knowledge():
+    # Сохраняем специфическую инструкцию, которой нет в базовых весах Llama 3.1
+    success = await save_knowledge_point(
+        point_id=1001,
+        title="MarmAI Deployment Secret Protocol",
+        content_text="Секретный протокол развертывания MarmAI: В случае сбоя Dragonfly, кэш автоматически переключается на резервную реплику, расположенную на сервере node0.marmai.internal.",
+        category="infrastructure"
+    )
+    if success:
+        return {"status": "success", "message": "Тестовые знания успешно загружены в Qdrant!"}
+    return {"status": "error", "message": "Не удалось загрузить данные"}
 
 @app.get("/config")
 async def get_config():

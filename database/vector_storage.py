@@ -1,7 +1,7 @@
 import os
 import time
 import httpx
-from qdrant_client import AsyncQdrantClient  # Используем асинхронный клиент
+from qdrant_client import AsyncQdrantClient  
 from qdrant_client.models import PointStruct, VectorParams, Distance
 from metrics.telemetry import log_event
 
@@ -45,7 +45,11 @@ async def get_text_embedding(text: str) -> list[float]:
             )
             response.raise_for_status()
             result = response.json()
-            return result.get("data", [{}])[0].get("embedding", [])
+            
+            data_list = result.get("data", [])
+            embedding = data_list[0].get("embedding", []) if data_list else []
+            return embedding
+            
     except Exception as e:
         log_event(
             body=f"Failed to generate text embedding: {str(e)}",
@@ -60,7 +64,6 @@ async def init_qdrant_collection() -> bool:
     qdrant_url, _, _ = get_service_urls()
     
     try:
-        # ИСПРАВЛЕНО: Создаем клиент напрямую, без async with
         client = AsyncQdrantClient(url=qdrant_url)
         collection_exists = await client.collection_exists(collection_name=COLLECTION_NAME)
         
@@ -73,29 +76,19 @@ async def init_qdrant_collection() -> bool:
                     distance=Distance.COSINE
                 )
             )
-            log_event(
-                body=f"Successfully created Qdrant collection: {COLLECTION_NAME}",
-                event_name="qdrant_collection_created",
-                attributes={"collection_name": COLLECTION_NAME, "status": "success"}
-            )
             print(f"=== [Qdrant] Коллекция '{COLLECTION_NAME}' успешно создана! ===")
         else:
             print(f"=== [Qdrant] Коллекция '{COLLECTION_NAME}' уже существует. Шаг пропущен. ===")
             
-        await client.close() # Закрываем клиент после выполнения
+        await client.close()
         return True
     except Exception as e:
-        log_event(
-            body=f"Failed to initialize Qdrant collection: {str(e)}",
-            event_name="qdrant_init_error",
-            attributes={"status": "error"}
-        )
         print(f"❌ === [Qdrant] Ошибка инициализации коллекции: {e} ===")
         return False
 
 
 async def save_knowledge_point(point_id: int, title: str, content_text: str, category: str) -> bool:
-    """Превращает текст в вектор и асинхронно сохраняет его в Qdrant."""
+    """Превращает текст в вектор и асинхронно сохраняет его в Qdrant через нативный асинхронный upsert."""
     qdrant_url, _, _ = get_service_urls()
     
     vector = await get_text_embedding(content_text)
@@ -103,7 +96,6 @@ async def save_knowledge_point(point_id: int, title: str, content_text: str, cat
         return False
         
     try:
-        # ИСПРАВЛЕНО: Прямое создание клиента
         client = AsyncQdrantClient(url=qdrant_url)
         point = PointStruct(
             id=int(point_id),
@@ -115,6 +107,7 @@ async def save_knowledge_point(point_id: int, title: str, content_text: str, cat
             }
         )
         
+        # ИСПРАВЛЕНО: Метод upsert у асинхронного клиента НАСТОЯЩИЙ асинхронный и требует await
         await client.upsert(
             collection_name=COLLECTION_NAME,
             points=[point]
@@ -129,16 +122,12 @@ async def save_knowledge_point(point_id: int, title: str, content_text: str, cat
         return True
         
     except Exception as err:
-        log_event(
-            body=f"Qdrant upsert operation failed: {str(err)}",
-            event_name="qdrant_upsert_error",
-            attributes={"status": "error", "point_id": point_id}
-        )
+        print(f"❌ [Qdrant Upsert Ошибка] {err}")
         return False
 
 
 async def search_similar_knowledge(query_text: str, limit: int = 2) -> str:
-    """Асинхронный семантический поиск в Qdrant для контекста RAG."""
+    """Асинхронный семантический поиск в Qdrant через метод query_points."""
     qdrant_url, _, _ = get_service_urls()
     
     query_vector = await get_text_embedding(query_text)
@@ -146,37 +135,30 @@ async def search_similar_knowledge(query_text: str, limit: int = 2) -> str:
         return ""
         
     try:
-        # ИСПРАВЛЕНО: Прямое создание клиента
         client = AsyncQdrantClient(url=qdrant_url)
-        search_results = await client.search(
+        
+        # ИСПРАВЛЕНО: Теперь используем актуальный метод query_points вместо устаревшего search
+        response = await client.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit
         )
         await client.close()
             
-        if not search_results:
+        if not response.points:
             return ""
             
         context_chunks = []
-        for hit in search_results:
+        for hit in response.points:
             payload = hit.payload
+            print(f"🎯 [Qdrant RAG СОВПАДЕНИЕ] Найдено: '{payload.get('title')}'")
             context_chunks.append(
                 f"--- Документ: {payload.get('title')} (Категория: {payload.get('category')}) ---\n"
                 f"{payload.get('content_text')}"
             )
             
-        log_event(
-            body=f"Semantic search completed. Found {len(search_results)} matches",
-            event_name="qdrant_search_success",
-            attributes={"matches_count": len(search_results), "status": "success"}
-        )
         return "\n\n".join(context_chunks)
         
     except Exception as err:
-        log_event(
-            body=f"Qdrant semantic search failed: {str(err)}",
-            event_name="qdrant_search_error",
-            attributes={"status": "error"}
-        )
+        print(f"❌ [Qdrant Query Ошибка] {err}")
         return ""
