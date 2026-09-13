@@ -61,11 +61,28 @@ async def lifespan(app: FastAPI):
     db_secrets = await fetch_database_secrets()
 
     if db_secrets:
-        if "database" in app_config:
-            app_config["database"]["user"] = db_secrets.get("user", app_config["database"].get("user"))
-            app_config["database"]["pass"] = db_secrets.get("pass", app_config["database"].get("pass"))
-            app_config["database"]["token"] = db_secrets.get("token", app_config["database"].get("token"))
-            print("🔐 === [Vault] Секреты InfluxDB успешно инжектированы в память приложения! ===")
+        # Гарантируем наличие секции database в памяти приложения
+        if "database" not in app_config:
+            app_config["database"] = {}
+            
+        # Извлекаем токен из Vault и токен из .env для сравнения
+        vault_token = db_secrets.get("token", "").strip()
+        env_token = os.getenv("INFLUXDB_BOOTSTRAP_TOKEN", "").strip()
+        
+        # ИСПРАВЛЕНО: Интеллектуальный отбор токена. Если в Vault лежит заглушка "test_token_influx" (меньше 20 символов),
+        # а в .env прописан боевой длинный токен, мы защищаем память приложения от перезаписи заглушкой.
+        final_token = vault_token
+        if len(vault_token) < 20 and len(env_token) > 20:
+            final_token = env_token
+            print("⚠️ [Vault] В сейфе обнаружен тестовый токен. Автоматически применен боевой токен из .env!")
+
+        app_config["database"]["user"] = db_secrets.get("user", os.getenv("INFLUXDB_BOOTSTRAP_USER", ""))
+        app_config["database"]["pass"] = db_secrets.get("pass", os.getenv("INFLUXDB_BOOTSTRAP_PASSWORD", ""))
+        app_config["database"]["token"] = final_token
+        app_config["database"]["database"] = db_secrets.get("database", os.getenv("INFLUXDB_BOOTSTRAP_DATABASE", "marmai_observability"))
+        app_config["database"]["org"] = db_secrets.get("org", os.getenv("INFLUXDB_BOOTSTRAP_ORG", "marmai_planet"))
+        
+        print("🔐 === [Vault] Секреты InfluxDB успешно инжектированы в память приложения! ===")
     else:
         print("⚠️ === [Vault] Используются базовые значения конфигурации.")
 
