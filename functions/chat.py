@@ -1,7 +1,9 @@
 import os
+import re
 import time
 import json
 import httpx
+import asyncio
 from fastapi import APIRouter, Request, HTTPException, status
 from fastapi.responses import StreamingResponse
 from metrics.telemetry import log_event
@@ -9,6 +11,7 @@ from metrics.telemetry import log_event
 # Импортируем наши асинхронные методы баз данных и хранилища
 from database.vector_storage import search_similar_knowledge
 from database.storage import load_prompt_from_minio
+from database.influx_storage import track_agent_telemetry
 
 router = APIRouter()
 
@@ -95,25 +98,95 @@ async def proxy_chat(request: Request):
         except (httpx.ConnectError, httpx.ConnectTimeout):
             raise HTTPException(status_code=503, detail="Ollama container offline")
 
+    def count_tokens_fallback(text: str) -> int:
+        """
+        Fast, lightweight regex-based token estimator fallback.
+        Splits text by words, spaces, and punctuation to match standard token bounds.
+        """
+        if not text:
+            return 0
+        return len(re.findall(r'\w+|[^\w\s]', text))
+    
     async def stream_generator():
+        # Buffer to collect the full model response text for post-stream token counting
+        full_completion_text = ""
+        
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 async with client.stream("POST", ollama_url, json=body) as response:
                     if response.status_code != 200:
                         yield f"data: {{\"error\": \"Ollama error {response.status_code}\"}}\n\n".encode('utf-8')
                         return
+                    
                     async for chunk in response.aiter_bytes():
                         if chunk:
+                            # 1. Decode chunk to intercept content text for completion tracking
+                            try:
+                                chunk_str = chunk.decode('utf-8', errors='ignore')
+                                # Ollama/OpenAI streams send chunks prefixed with 'data: '
+                                if chunk_str.startswith("data:"):
+                                    for line in chunk_str.split("\n"):
+                                        if line.startswith("data: ") and "[DONE]" not in line:
+                                            clean_json = line[6:].strip()
+                                            if clean_json:
+                                                data_payload = json.loads(clean_json)
+                                                # Capture token fragment from choices delta content
+                                                delta_content = data_payload.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                                full_completion_text += delta_content
+                            except Exception:
+                                pass # Prevent token counting parsing errors from dropping client streaming chunks
+                            
+                            # 2. Immediately yield raw bytes back to the waiting client client
                             yield chunk
             
-            generation_time = round(time.perf_counter() - start_time, 3)
+            # --- POST-STREAM PERFORMANCE METRICS TRACKING ---
+            generation_time_ms = int((time.perf_counter() - start_time) * 1000)
+            
             log_event(
-                body=f"RAG Chat success in {generation_time}s",
+                body=f"RAG Chat success in {generation_time_ms / 1000:.3f}s",
                 event_name="rag_chat_success",
                 attributes={"status": "success", "context_injected": bool(rag_context)}
             )
-        except Exception:
-            yield f"data: {{\"error\": \"Stream interrupted\"}}\n\n".encode('utf-8')
+
+            # Compile prompt context payload string to count incoming text mass
+            full_prompt_text = "".join([m.get("content", "") for m in body.get("messages", [])])
+            
+            # Compute exact token volumes via industrial fallback counter
+            prompt_tokens = count_tokens_fallback(full_prompt_text)
+            completion_tokens = count_tokens_fallback(full_completion_text)
+
+            # 3. Fire-and-Forget non-blocking asynchronous payload drop directly to InfluxDB 3.0
+            asyncio.create_task(
+                track_agent_telemetry(
+                    session_id=body.get("session_id", "web_session"),
+                    graph_name="marm_ai_v1",
+                    node_name="proxy_chat_router",
+                    model_name=model_name,
+                    status="success",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    latency_ms=generation_time_ms,
+                    tool_called="none"
+                )
+            )
+
+        except Exception as e:
+            # Track failure payload to your time-series tables on stream crash
+            generation_time_ms = int((time.perf_counter() - start_time) * 1000)
+            asyncio.create_task(
+                track_agent_telemetry(
+                    session_id=body.get("session_id", "web_session"),
+                    graph_name="marm_ai_v1",
+                    node_name="proxy_chat_router",
+                    model_name=model_name,
+                    status="failed",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=generation_time_ms,
+                    tool_called="none"
+                )
+            )
+            yield f"data: {{\"error\": \"Stream interrupted: {str(e)}\"}}\n\n".encode('utf-8')
 
     return StreamingResponse(
         stream_generator(), 

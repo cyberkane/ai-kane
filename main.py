@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-import time
-import httpx
 import asyncio
-import uvicorn
 import datetime
 import configparser
 from fastapi import FastAPI
@@ -24,6 +21,7 @@ from tools.infra_status import check_infrastructure_status
 from tools.test_runner import run_project_tests
 from functions.commit_track import router as commit_track_router
 from database.vault_storage import fetch_database_secrets
+from database.influx_storage import track_agent_telemetry
 
 load_dotenv()
 app_config = {}
