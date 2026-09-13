@@ -12,10 +12,11 @@ def test_environment_variables():
     assert os.getenv("MINIO_SECRET_KEY") == "marmadmin"
 
 def test_analytics_import():
-    """Проверяем, что кристаллическая решётка импортов аналитики не сломана."""
+    """Проверяем, что кристаллическая решётка импортов нашего нового модуля телеметрии не сломана."""
     try:
-        import analytics
-        print("🟢 Модуль analytics успешно обнаружен!")
+        from metrics.telemetry import log_event
         assert True
     except Exception as e:
-        pytest.fail(f"Критическая ошибка: модуль analytics не может быть импортирован. Ошибка: {e}")
+        import pytest
+        pytest.fail(f"Критическая ошибка: модуль metrics.telemetry не может быть импортирован. Ошибка: {e}")
+

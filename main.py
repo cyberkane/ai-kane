@@ -20,6 +20,8 @@ from functions.health import router as health_router
 from database.vector_storage import init_qdrant_collection, save_knowledge_point
 from database.storage import init_prompt_storage
 from functions.agent import router as agent_router
+from tools.infra_status import check_infrastructure_status
+from tools.test_runner import run_project_tests
 
 load_dotenv()
 app_config = {}
@@ -100,6 +102,15 @@ app.include_router(autocomplete_router, prefix="/v1")
 app.include_router(embedder_router, prefix="/v1")
 app.include_router(agent_router, prefix="/v1")
 app.include_router(health_router)
+
+@app.get("/test-tools")
+async def test_all_tools():
+    infra_report = await check_infrastructure_status()
+    test_report = await run_project_tests("tests")
+    return {
+        "infrastructure_status": infra_report,
+        "pytest_status": test_report
+    }
 
 @app.post("/test-add-knowledge")
 async def test_add_knowledge():
