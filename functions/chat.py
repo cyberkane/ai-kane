@@ -70,7 +70,7 @@ async def proxy_chat(request: Request):
         rag_context = await search_similar_knowledge(query_text=user_query, limit=2)
     
     print(f"🔍 [RAG ТЕСТ] Найденный контекст в Qdrant:\n{rag_context if rag_context else '⚠️ НИЧЕГО НЕ НАЙДЕНО!'}\n")
-
+    
     # 3. Собираем обогащенный промпт
     enriched_system_content = f"{system_base}\n\n"
     if rag_context:
@@ -79,8 +79,44 @@ async def proxy_chat(request: Request):
             f"Используй эти данные для ответа пользователю:\n{rag_context}\n"
             f"========================================\n"
         )
+    active_file_context = ""
+    try:
+        from database.storage import redis_client
+        # Достаем путь и контент, которые туда пишет фоновый вотчер проекта
+        active_file_path = await redis_client.get("active_file:path")
+        active_file_content = await redis_client.get("active_file:content")
+        
+        if active_file_path and active_file_content:
+            print(f"👁️ [MarmAI ШЛЮЗ] VS Code в фокусе! Файл: '{active_file_path}' автоматически добавлен в контекст.")
+            active_file_context = (
+                f"=== ТЕКУЩИЙ ОТКРЫТЫЙ ФАЙЛ В VS CODE РЕДАКТОРЕ ===\n"
+                f"Путь к файлу: {active_file_path}\n"
+                f"--- НАЧАЛО СОДЕРЖИМОГО ФАЙЛА ---\n"
+                f"{active_file_content}\n"
+                f"--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---\n"
+                f"Учитывай этот код при ответе. Если пользователь просит отрефакторить, протестировать или объяснить код, "
+                f"работай именно с этим содержимым.\n"
+                f"=================================================\n\n"
+            )
+    except Exception as cache_err:
+        print(f"⚠️ [MarmAI ШЛЮЗ] Не удалось извлечь контекст VS Code из Dragonfly: {cache_err}")
 
-    # 4. Модифицируем входящий body запроса
+    # 4. Собираем финальный обогащенный системный промпт
+    enriched_system_content = f"{system_base}\n\n"
+    
+    # Сначала инжектируем то, что открыто на экране в VS Code (наивысший приоритет)
+    if active_file_context:
+        enriched_system_content += active_file_context
+        
+    # Затем добавляем долгосрочную память RAG из Qdrant
+    if rag_context:
+        enriched_system_content += (
+            f"=== ВАЖНАЯ ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ (RAG) ===\n"
+            f"Используй эти архивные данные при необходимости:\n{rag_context}\n"
+            f"==============================================\n"
+        )
+
+    # 5. Модифицируем входящий массив сообщений: инжектируем или подменяем system prompt
     system_msg_found = False
     for msg in messages:
         if msg.get("role") == "system":
@@ -93,18 +129,33 @@ async def proxy_chat(request: Request):
         
     body["messages"] = messages
     
-    # 5. Динамическое форсирование вызова функций (Tool Choice) под API Ollama
+    # 6. Умный ИИ-Фильтр и подготовка финального payload инструментов под API Ollama
     user_query_lower = user_query.lower()
-    if TOOLS_SCHEMAS:
+    infrastructure_triggers = [
+        "время", "time", "часы", "дата", "date", 
+        "статус", "контейнер", "инфраструктур", "health", "систем",
+        "тест", "pytest", "протестируй", "автотест", "сгенерируй"
+    ]
+    
+    is_tool_request = any(trigger in user_query_lower for trigger in infrastructure_triggers)
+    
+    if TOOLS_SCHEMAS and is_tool_request:
         body["tools"] = TOOLS_SCHEMAS
+        body["tool_choice"] = "auto"
+        print(f"🔧 [MarmAI ШЛЮЗ] Запрос признан техническим. Подключаю схемы инструментов.")
         
-        if "время" in user_query_lower or "time" in user_query_lower or "часы" in user_query_lower:
+        # Нативное строковое форсирование конкретных функций для Ollama при жестких совпадениях
+        if "время" in user_query_lower or "time" in user_query_lower:
             body["tool_choice"] = "get_system_time"
-            print("🎯 [MarmAI ШЛЮЗ] Обнаружен ключевой запрос времени. Форсирую string tool_choice: get_system_time")
-            
-        elif "статус" in user_query_lower or "инфраструктур" in user_query_lower or "контейнер" in user_query_lower:
+        elif "статус" in user_query_lower or "инфраструктур" in user_query_lower:
             body["tool_choice"] = "check_infrastructure_status"
-            print("🎯 [MarmAI ШЛЮЗ] Обнаружен запрос систем. Форсирую string tool_choice: check_infrastructure_status")
+    else:
+        # Если запрос бытовой — полностью изолируем инструменты, чтобы исключить JSON-галлюцинации
+        if "tools" in body:
+            del body["tools"]
+        if "tool_choice" in body:
+            del body["tool_choice"]
+        print(f"💬 [MarmAI ШЛЮЗ] Бытовой запрос. Слой инструментов изолирован.")
 
     ollama_url = f"{get_ollama_url(app_config)}/v1/chat/completions"
     

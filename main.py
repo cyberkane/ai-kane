@@ -6,6 +6,7 @@ import datetime
 import configparser
 from fastapi import FastAPI
 from dotenv import load_dotenv
+from watchfiles import awatch
 from contextlib import asynccontextmanager
 
 #Локальные зависимости
@@ -15,7 +16,7 @@ from functions.autocomplete import router as autocomplete_router
 from functions.embedder import router as embedder_router
 from functions.health import router as health_router
 from database.vector_storage import init_qdrant_collection, save_knowledge_point
-from database.storage import init_prompt_storage
+from database.storage import init_prompt_storage, redis_client
 from functions.agent import router as agent_router
 from tools.infra_status import check_infrastructure_status
 from tools.test_runner import run_project_tests
@@ -34,6 +35,44 @@ def replace_env_vars(text: str) -> str:
         return os.environ.get(var_name, f"${{{var_name}}}")
         
     return re.sub(pattern, match_handler, text)
+
+async def watch_project_files():
+    """
+    Фоновый вотчер рабочей директории проекта.
+    В реальном времени отслеживает изменения файлов и кэширует контекст в Dragonfly RAM.
+    """
+    print("👁️ === [Watcher] Фоновое отслеживание файлов проекта запущено! ===")
+    
+    try:
+        # awatch возвращает асинхронный генератор изменений, запускаем цикл прямо по нему
+        async for changes in awatch(
+            ".",
+            watch_filter=lambda change, path: (
+                not any(p in path for p in [".venv", ".git", ".pytest_cache", "__pycache__"])
+                and path.endswith((".py", ".md", ".ini", ".env"))
+            )
+        ):
+            for change_type, file_path in changes:
+                rel_path = os.path.relpath(file_path, os.getcwd())
+                
+                # change_type: 1 - добавлен, 2 - изменен
+                if change_type in [1, 2] and os.path.exists(file_path):
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        
+                        # Атомарно записываем путь и контент в Dragonfly RAM
+                        await redis_client.set("active_file:path", rel_path, ex=1800)
+                        await redis_client.set("active_file:content", content, ex=1800)
+                        
+                        print(f"📝 [Watcher] Контекст измененного файла '{rel_path}' успешно залит в Dragonfly RAM!")
+                        
+                    except Exception as file_err:
+                        print(f"⚠️ [Watcher] Не удалось прочитать измененный файл {rel_path}: {file_err}")
+    except asyncio.CancelledError:
+        print("👁️ === [Watcher] Фоновое отслеживание файлов остановлено. ===")
+    except Exception as e:
+        print(f"❌ [Watcher] Критический сбой вотчера: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -106,11 +145,19 @@ async def lifespan(app: FastAPI):
             
     # --- Автоматическая инициализация коллекции Qdrant ---
     await init_qdrant_collection()
-    
     # --- Автоматическая инициализация MinIO ---
     await init_prompt_storage()
     
+    watcher_task = asyncio.create_task(watch_project_files())
+    
     yield  # В этой точке приложение работает и принимает запросы
+    # При выключении сервера мягко отменяем фоновую задачу
+    watcher_task.cancel()
+    try:
+        await watcher_task
+    except asyncio.CancelledError:
+        pass
+    
     # Логирование остановки приложения (код сработает после выключения сервера)
     if monitoring_cfg:
         try:
@@ -135,6 +182,7 @@ app.include_router(commit_track_router, prefix="/v1")
 app.include_router(health_router)
 
 @app.get("/test-tools")
+
 async def test_all_tools():
     infra_report = await check_infrastructure_status()
     test_report = await run_project_tests("tests")
