@@ -6,7 +6,8 @@ import json
 import httpx
 import inspect
 import asyncio
-from fastapi import APIRouter, Request, HTTPException, status
+from pydantic import BaseModel
+from fastapi import APIRouter, Request, HTTPException, status, Body
 from fastapi.responses import StreamingResponse
 from metrics.telemetry import log_event
 
@@ -18,6 +19,9 @@ from tools.registry import TOOLS_SCHEMAS, TOOLS_REGISTRY
 
 router = APIRouter()
 
+class CommitPayload(BaseModel):
+    hash: str
+    message: str
 
 def get_ollama_url(app_config: dict) -> str:
     chat_cfg = app_config.get("chat", {})
@@ -26,7 +30,6 @@ def get_ollama_url(app_config: dict) -> str:
     if "ollama_core" in host and not os.path.exists("/.dockerenv"):
         host = "http://localhost"
     return f"{host}:{port}"
-
 
 @router.post("/chat/completions")
 async def proxy_chat(request: Request):
@@ -352,3 +355,28 @@ async def proxy_chat(request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
     )
+
+@router.post("/telemetry/git-commit")
+async def git_commit_trigger(payload: CommitPayload):
+    """Эндпоинт-триггер. Вызывается локальным Git-хуком post-commit при каждом коммите."""
+    import re
+    from database.task_storage import update_task_status_db, get_all_tasks_db
+    
+    print(f"📦 [Git Trigger] Перехвачен коммит {payload.hash[:7]}: {payload.message}")
+    
+    # Регулярным выражением ищем упоминание ID задачи (например: #12, close #7, fix #1)
+    task_ids = re.findall(r'#(\d+)', payload.message)
+    
+    if not task_ids:
+        return {"status": "ignored", "reason": "No task ID found in commit message (e.g. #12)"}
+        
+    closed_tasks = []
+    for t_id in task_ids:
+        task_id_int = int(t_id)
+        # Переводим задачу в DONE и привязываем хеш коммита
+        success = update_task_status_db(task_id_int, "done", commit_hash=payload.hash)
+        if success:
+            closed_tasks.append(task_id_int)
+            print(f"🎉 [Git Trigger] Задача #{task_id_int} АВТОМАТИЧЕСКИ переведена в статус DONE!")
+            
+    return {"status": "success", "closed_tasks": closed_tasks}

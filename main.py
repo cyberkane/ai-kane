@@ -23,6 +23,7 @@ from tools.test_runner import run_project_tests
 from functions.commit_track import router as commit_track_router
 from database.vault_storage import fetch_database_secrets
 from database.influx_storage import track_agent_telemetry
+from database.task_storage import init_task_db, get_all_tasks_db
 
 load_dotenv()
 app_config = {}
@@ -168,6 +169,15 @@ async def lifespan(app: FastAPI):
     await load_architecture_to_cache()
     
     watcher_task = asyncio.create_task(watch_project_files())
+    
+    await init_prompt_storage()
+    await load_architecture_to_cache()
+    
+    init_task_db()
+    
+    # Прогреваем кэш активных задач в Dragonfly RAM
+    active_tasks = get_all_tasks_db(status_filter="in_progress") + get_all_tasks_db(status_filter="backlog")
+    await redis_client.set("sprint:active_tasks", str(active_tasks))
     
     yield  # В этой точке приложение работает и принимает запросы
     # При выключении сервера мягко отменяем фоновую задачу

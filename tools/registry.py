@@ -3,6 +3,7 @@ from tools.test_runner import run_project_tests
 from tools.infra_status import check_infrastructure_status
 from tools.autotests import generate_autotest_for_file
 from tools.project_mapper import generate_project_architecture
+from tools.task_tracker import manage_tasks
 
 # Маппинг имен для вызова графом (включает как синхронные, так и асинхронные функции)
 TOOLS_REGISTRY = {
@@ -10,6 +11,7 @@ TOOLS_REGISTRY = {
     "run_project_tests": run_project_tests,
     "check_infrastructure_status": check_infrastructure_status,
     "generate_autotest_for_file": generate_autotest_for_file,
+    "manage_tasks": manage_tasks,
     "generate_project_architecture": generate_project_architecture
 }
 
@@ -55,6 +57,24 @@ TOOLS_SCHEMAS = [
             "parameters": {
                 "type": "object", 
                 "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_tasks",
+            "description": "Управляет локальным таск-трекером спринтов. Позволяет создавать задачи ('create'), выводить список всех задач ('list') и закрывать их ('close').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "Действие: 'create', 'list' или 'close'.", "enum": ["create", "list", "close"]},
+                    "title": {"type": "string", "description": "Заголовок задачи (требуется для 'create')."},
+                    "description": {"type": "string", "description": "Описание задачи."},
+                    "priority": {"type": "string", "description": "Приоритет: 'low', 'medium', 'high'.", "enum": ["low", "medium", "high"]},
+                    "task_id": {"type": "integer", "description": "ID задачи (требуется для 'close')."}
+                },
+                "required": ["action"]
+            }
         }
     },
     {
