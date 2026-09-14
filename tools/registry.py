@@ -67,11 +67,20 @@ TOOLS_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "description": "Действие: 'create', 'list' или 'close'.", "enum": ["create", "list", "close"]},
-                    "title": {"type": "string", "description": "Заголовок задачи (требуется для 'create')."},
+                    "action": {
+                        "type": "string", 
+                        "description": "Действие с таск-трекером.", 
+                        "enum": ["create", "list", "update_status", "close"]
+                    },
+                    "title": {"type": "string", "description": "Заголовок задачи (для 'create')."},
                     "description": {"type": "string", "description": "Описание задачи."},
-                    "priority": {"type": "string", "description": "Приоритет: 'low', 'medium', 'high'.", "enum": ["low", "medium", "high"]},
-                    "task_id": {"type": "integer", "description": "ID задачи (требуется для 'close')."}
+                    "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "task_id": {"type": "integer", "description": "ID задачи для смены статуса."},
+                    "status": {
+                        "type": "string", 
+                        "description": "Новый целевой статус.", 
+                        "enum": ["backlog", "in_work", "testing", "done", "canceled"]
+                    }
                 },
                 "required": ["action"]
             }
