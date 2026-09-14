@@ -79,6 +79,19 @@ async def proxy_chat(request: Request):
             f"Используй эти данные для ответа пользователю:\n{rag_context}\n"
             f"========================================\n"
         )
+    
+    try:
+        from database.storage import redis_client
+        project_arch = await redis_client.get("project:architecture")
+        if project_arch:
+            enriched_system_content += (
+                f"=== ГЛОБАЛЬНАЯ АРХИТЕКТУРА И СТРУКТУРА ТЕКУЩЕГО ПРОЕКТА ===\n"
+                f"{project_arch}\n"
+                f"===========================================================\n\n"
+            )
+    except Exception as arch_cache_err:
+        print(f"⚠️ Ошибка извлечения глобальной архитектуры: {arch_cache_err}")
+    
     active_file_context = ""
     try:
         from database.storage import redis_client

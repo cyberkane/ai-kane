@@ -2,6 +2,7 @@ from tools.system_time import get_system_time
 from tools.test_runner import run_project_tests
 from tools.infra_status import check_infrastructure_status
 from tools.autotests import generate_autotest_for_file
+from tools.project_mapper import generate_project_architecture
 
 # Маппинг имен для вызова графом (включает как синхронные, так и асинхронные функции)
 TOOLS_REGISTRY = {
@@ -9,6 +10,7 @@ TOOLS_REGISTRY = {
     "run_project_tests": run_project_tests,
     "check_infrastructure_status": check_infrastructure_status,
     "generate_autotest_for_file": generate_autotest_for_file,
+    "generate_project_architecture": generate_project_architecture
 }
 
 # Строгие JSON-схемы для Ollama / LangGraph
@@ -43,6 +45,16 @@ TOOLS_SCHEMAS = [
             "name": "check_infrastructure_status",
             "description": "Сканирует порты и проверяет статус здоровья контейнеров Vault, MinIO, InfluxDB, Qdrant и Dragonfly.",
             "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_project_architecture",
+            "description": "Сканирует весь проект, строит дерево каталогов, анализирует связи между модулями и генерирует файл project_architecture.md.",
+            "parameters": {
+                "type": "object", 
+                "properties": {}}
         }
     },
     {

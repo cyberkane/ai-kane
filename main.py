@@ -74,6 +74,23 @@ async def watch_project_files():
     except Exception as e:
         print(f"❌ [Watcher] Критический сбой вотчера: {e}")
 
+async def load_architecture_to_cache():
+    """Считывает project_architecture.md при запуске и кэширует структуру проекта в Dragonfly RAM."""
+    arch_file = "project_architecture.md"
+    from database.storage import redis_client
+    
+    if os.path.exists(arch_file):
+        try:
+            with open(arch_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            # Сохраняем в кэш без TTL (глобальный контекст проекта)
+            await redis_client.set("project:architecture", content)
+            print("🗺️ === [Dragonfly] Глобальная архитектурная карта проекта успешно загружена в ОЗУ! ===")
+        except Exception as e:
+            print(f"⚠️ [Dragonfly] Не удалось загрузить карту архитектуры в кэш: {e}")
+    else:
+        print("⚠️ === [Архитектура] Файл project_architecture.md не найден. Попросите агента сгенерировать его. ===")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[СТАРТ] Загружаем конфигурацию")
@@ -147,6 +164,8 @@ async def lifespan(app: FastAPI):
     await init_qdrant_collection()
     # --- Автоматическая инициализация MinIO ---
     await init_prompt_storage()
+    # --- Загрузка архитектуры проекта в Dragonfly RAM ---
+    await load_architecture_to_cache()
     
     watcher_task = asyncio.create_task(watch_project_files())
     
