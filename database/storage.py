@@ -141,3 +141,41 @@ async def load_prompt_from_minio(filename: str) -> str:
         print(f"⚠️ [Dragonfly] Не удалось записать ключ в ОЗУ: {cache_err}")
         
     return prompt_text
+
+
+# -*- coding: utf-8 -*-
+import os
+
+async def load_project_code_to_cache():
+    """
+    Рекурсивно сканирует исходный код проекта (database, functions, tools)
+    и загружает содержимое всех Python-файлов в оперативную память Dragonfly RAM.
+    """
+    target_dirs = ["database", "functions", "tools"]
+    ignore_files = {"__pycache__", "tasks.db", "project_architecture.md"}
+    
+    print("🧠 === [Dragonfly] Индексация исходного кода проекта в ОЗУ... ===")
+    
+    indexed_files_count = 0
+    for t_dir in target_dirs:
+        if os.path.exists(t_dir):
+            for root, dirs, files in os.walk(t_dir):
+                for file in files:
+                    if file.endswith(".py") and file not in ignore_files:
+                        file_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(file_path, os.getcwd())
+                        
+                        try:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                code_content = f.read()
+                            
+                            # Записываем код файла в Dragonfly RAM (Ключ: project:code:путь_к_файлу)
+                            # Сохраняем без TTL (глобальный контекст исходников)
+                            cache_key = f"project:code:{rel_path.replace(os.sep, '/')}"
+                            await redis_client.set(cache_key, code_content)
+                            indexed_files_count += 1
+                        except Exception as e:
+                            print(f"⚠️ [Dragonfly] Не удалось проиндексировать {rel_path}: {e}")
+                            
+    print(f"✅ [Dragonfly] Индексация завершена. Успешно загружено модулей в ОЗУ: {indexed_files_count}")
+

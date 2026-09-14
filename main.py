@@ -16,7 +16,7 @@ from functions.autocomplete import router as autocomplete_router
 from functions.embedder import router as embedder_router
 from functions.health import router as health_router
 from database.vector_storage import init_qdrant_collection, save_knowledge_point
-from database.storage import init_prompt_storage, redis_client
+from database.storage import init_prompt_storage, redis_client, load_project_code_to_cache
 from functions.agent import router as agent_router
 from tools.infra_status import check_infrastructure_status
 from tools.test_runner import run_project_tests
@@ -167,7 +167,9 @@ async def lifespan(app: FastAPI):
     await init_prompt_storage()
     # --- Загрузка архитектуры проекта в Dragonfly RAM ---
     await load_architecture_to_cache()
-    
+    # --- Загрузка ВСЕГО исходного кода проекта в Dragonfly RAM ---
+    await load_project_code_to_cache()
+
     watcher_task = asyncio.create_task(watch_project_files())
     
     await init_prompt_storage()

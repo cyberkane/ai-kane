@@ -16,3 +16,7 @@ github/
 
 # VS Code
 .vscode/
+
+tasks.db/
+.tasks.db
+tasks.db

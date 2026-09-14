@@ -76,6 +76,7 @@ async def proxy_chat(request: Request):
     
     # 3. Собираем обогащенный промпт
     enriched_system_content = f"{system_base}\n\n"
+    
     if rag_context:
         enriched_system_content += (
             f"=== ВАЖНАЯ ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ ===\n"
@@ -94,30 +95,33 @@ async def proxy_chat(request: Request):
             )
     except Exception as arch_cache_err:
         print(f"⚠️ Ошибка извлечения глобальной архитектуры: {arch_cache_err}")
-    
+
     active_file_context = ""
     try:
         from database.storage import redis_client
-        # Достаем путь и контент, которые туда пишет фоновый вотчер проекта
-        active_file_path = await redis_client.get("active_file:path")
-        active_file_content = await redis_client.get("active_file:content")
-        
-        if active_file_path and active_file_content:
-            print(f"👁️ [MarmAI ШЛЮЗ] VS Code в фокусе! Файл: '{active_file_path}' автоматически добавлен в контекст.")
-            active_file_context = (
-                f"=== ТЕКУЩИЙ ОТКРЫТЫЙ ФАЙЛ В VS CODE РЕДАКТОРЕ ===\n"
-                f"Путь к файлу: {active_file_path}\n"
-                f"--- НАЧАЛО СОДЕРЖИМОГО ФАЙЛА ---\n"
-                f"{active_file_content}\n"
-                f"--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---\n"
-                f"Учитывай этот код при ответе. Если пользователь просит отрефакторить, протестировать или объяснить код, "
-                f"работай именно с этим содержимым.\n"
-                f"=================================================\n\n"
+        # Получаем все ключи исходного кода из Dragonfly
+        all_keys = await redis_client.keys("project:code:*")
+        if all_keys:
+            enriched_system_content += "=== ИСХОДНЫЙ КОД СУЩЕСТВУЮЩИХ МОДУЛЕЙ В РЕПОЗИТОРИИ ===\n"
+            for k in all_keys:
+                file_name = k.replace("project:code:", "")
+                # Расшифровываем байты в строку, если Redis вернул их в байтах
+                if isinstance(file_name, bytes):
+                    file_name = file_name.decode('utf-8')
+                # Добавляем в промпт список файлов, чтобы модель знала, какие модули РЕАЛЬНО существуют
+                enriched_system_content += f"- Доступный модуль: `{file_name}`\n"
+            enriched_system_content += (
+                "Если пользователь просит добавить задачу для файла, которого НЕТ в этом списке, "
+                "значит этого модуля еще не существует на диске. В этом случае вызывай ТОЛЬКО manage_tasks.\n"
+                "=======================================================\n\n"
             )
-    except Exception as cache_err:
-        print(f"⚠️ [MarmAI ШЛЮЗ] Не удалось извлечь контекст VS Code из Dragonfly: {cache_err}")
+    except Exception as code_cache_err:
+        print(f"⚠️ Ошибка извлечения карты исходного кода: {code_cache_err}")
 
-    # 4. Собираем финальный обогащенный системный промпт
+
+    # =========================================================================
+    # 4. СОБИРАЕМ ФИНАЛЬНЫЙ ОБОГАЩЕННЫЙ СИСТЕМНЫЙ ПРОМПТ (ИСПРАВЛЕНО)
+    # =========================================================================
     enriched_system_content = f"{system_base}\n\n"
     
     # Сначала инжектируем то, что открыто на экране в VS Code (наивысший приоритет)
@@ -128,9 +132,10 @@ async def proxy_chat(request: Request):
     if rag_context:
         enriched_system_content += (
             f"=== ВАЖНАЯ ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ (RAG) ===\n"
-            f"Используй эти архивные данные при необходимости:\n{rag_context}\n"
+            f"Используй эти данные при необходимости:\n{rag_context}\n"
             f"==============================================\n"
         )
+    # =========================================================================
 
     # 5. Модифицируем входящий массив сообщений: инжектируем или подменяем system prompt
     system_msg_found = False
@@ -150,7 +155,8 @@ async def proxy_chat(request: Request):
     infrastructure_triggers = [
         "время", "time", "часы", "дата", "date", 
         "статус", "контейнер", "инфраструктур", "health", "систем",
-        "тест", "pytest", "протестируй", "автотест", "сгенерируй"
+        "тест", "pytest", "протестируй", "автотест", "сгенерируй",
+        "задачу", "задач", "таск", "task", "трекер", "tracker", "бэклог", "backlog"
     ]
     
     is_tool_request = any(trigger in user_query_lower for trigger in infrastructure_triggers)
@@ -160,19 +166,23 @@ async def proxy_chat(request: Request):
         body["tool_choice"] = "auto"
         print(f"🔧 [MarmAI ШЛЮЗ] Запрос признан техническим. Подключаю схемы инструментов.")
         
-        # Нативное строковое форсирование конкретных функций для Ollama при жестких совпадениях
+        # Строковое форсирование конкретных функций для Ollama при жестких совпадениях
         if "время" in user_query_lower or "time" in user_query_lower:
             body["tool_choice"] = "get_system_time"
         elif "статус" in user_query_lower or "инфраструктур" in user_query_lower:
             body["tool_choice"] = "check_infrastructure_status"
+        # ИСПРАВЛЕНО: Принудительно направляем модель в таск-трекер, если она пытается управлять бэклогом
+        elif any(w in user_query_lower for w in ["задач", "таск", "task", "трекер", "tracker", "бэклог", "backlog"]):
+            body["tool_choice"] = "manage_tasks"
+            print("🎯 [MarmAI ШЛЮЗ] Обнаружен запрос бэклога. Форсирую string tool_choice: manage_tasks")
+
     else:
-        # Если запрос бытовой — полностью изолируем инструменты, чтобы исключить JSON-галлюцинации
         if "tools" in body:
             del body["tools"]
         if "tool_choice" in body:
             del body["tool_choice"]
         print(f"💬 [MarmAI ШЛЮЗ] Бытовой запрос. Слой инструментов изолирован.")
-
+    # =========================================================================
     ollama_url = f"{get_ollama_url(app_config)}/v1/chat/completions"
     
     # Проверка доступности LLM
